@@ -9,6 +9,7 @@ import {
   subagentSessionIds,
 } from "./state";
 import { loadEnv } from "./utils";
+
 // eslint-disable-next-line @typescript-eslint/require-await
 export const LaminarPlugin: Plugin = async ({ client }) => {
   loadEnv({
