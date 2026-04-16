@@ -1,6 +1,6 @@
 {
   "name": "@lmnr-ai/opencode-plugin",
-  "version": "0.0.1-alpha.1",
+  "version": "0.1.0",
   "description": "Laminar AI plugin for OpenCode",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
