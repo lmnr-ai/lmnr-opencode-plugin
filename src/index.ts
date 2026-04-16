@@ -162,3 +162,5 @@ export const LaminarPlugin: Plugin = async ({ client }) => {
     },
   };
 };
+
+export default LaminarPlugin;

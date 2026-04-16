@@ -1,12 +1,19 @@
 {
   "name": "@lmnr-ai/opencode-plugin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Laminar AI plugin for OpenCode",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
   "types": "dist/index.d.cts",
   "exports": {
-    ".": "./dist/index.mjs"
+    ".": {
+      "types": {
+        "require": "./dist/index.d.cts",
+        "import": "./dist/index.d.mts"
+      },
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
   },
   "files": [
     "dist"
