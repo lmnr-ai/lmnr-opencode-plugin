@@ -2,7 +2,7 @@
 
 ## Installation
 
-In your [opencode.json](https://opencode.ai/docs/plugins/#load-order):\
+In your [opencode.json](https://opencode.ai/docs/plugins/#load-order):
 
 ```json
 {
