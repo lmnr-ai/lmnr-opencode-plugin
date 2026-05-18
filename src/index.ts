@@ -118,15 +118,11 @@ export const LaminarPlugin: Plugin = async ({ client }) => {
       { sessionID, agent, model, messageID, variant },
       output,
     ) => {
-      if (
-        Object.values(subagentSessionIds).some((childSessions) =>
-          childSessions.has(sessionID),
-        ) ||
-        sessionCurrentTurnSpan[sessionID]
-      ) {
-        // Subagent messages (first prompt) also emit this event, so we skip them.
-        return;
-      }
+      // Always strip the synthetic Laminar context part from the outgoing
+      // message and capture the most recent context for this session, even
+      // if we are about to skip span creation. Otherwise the LLM would see
+      // the synthetic part on its prompt and the new context would never
+      // overwrite a stale one carried over from a previous turn.
       const newParts = output.parts.filter((part) => {
         if (
           part.type === "text" &&
@@ -142,9 +138,22 @@ export const LaminarPlugin: Plugin = async ({ client }) => {
         return true;
       });
       output.parts = newParts;
+
+      if (
+        Object.values(subagentSessionIds).some((childSessions) =>
+          childSessions.has(sessionID),
+        ) ||
+        sessionCurrentTurnSpan[sessionID]
+      ) {
+        // Subagent messages (first prompt) also emit this event, so we skip
+        // span creation for them. Same for sessions that already have an
+        // open turn span — the AI SDK spans will re-parent under it.
+        return;
+      }
+
       const externalContext = sessionExternalContexts[sessionID];
       const span = Laminar.startSpan({
-        name: "turn",
+        name: "opencode turn",
         input: {
           sessionID,
           agent,
