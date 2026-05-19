@@ -165,7 +165,7 @@ export const LaminarPlugin: Plugin = async ({ client }) => {
           externalContext,
         },
         sessionId: sessionID,
-        parentSpanContext: externalContext,
+        ...(externalContext ? { parentSpanContext: externalContext } : {}),
       });
       sessionCurrentTurnSpan[sessionID] = span;
     },
