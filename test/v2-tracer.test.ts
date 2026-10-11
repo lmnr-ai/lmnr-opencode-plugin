@@ -350,4 +350,18 @@ describe("SessionTracer", () => {
       content: [{ type: "text", text: "second" }],
     });
   });
+  it("ignores subagent progress that would make a session its own ancestor", () => {
+    const t = new SessionTracer();
+    t.handle(ev("session.execution.started", { sessionID: "ses_loop" }));
+    step(t, "ses_loop", "msg_l1", {
+      tool: { id: "call_self", name: "subagent", input: {} },
+    });
+    t.handle(ev("session.tool.progress", {
+      sessionID: "ses_loop", assistantMessageID: "msg_l1", id: "call_self",
+      metadata: { sessionID: "ses_loop" },
+    }));
+    step(t, "ses_loop", "msg_l2", { text: "still tracing" });
+    t.handle(ev("session.execution.succeeded", { sessionID: "ses_loop" }));
+    expect(byName("opencode turn")).toHaveLength(1);
+  });
 });

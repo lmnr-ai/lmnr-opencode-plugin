@@ -437,6 +437,8 @@ export class SessionTracer {
         const tool = state?.tools.get(event.data.id);
         const childID = event.data.metadata?.sessionID;
         if (!tool || !SPAWNING_TOOL_NAMES.has(tool.name) || typeof childID !== "string") break;
+        // The child comes from event metadata; never let it close a parent cycle.
+        if ([...this.lineage(state!)].some((session) => session.id === childID)) break;
         const child = this.session(childID);
         child.parentID ??= event.data.sessionID;
         child.spawn = { span: tool.span, toolCallId: event.data.id };

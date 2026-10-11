@@ -82,7 +82,9 @@ export const setupV2 = async (ctx: PluginContext) => {
     controller.abort();
     tracer.shutdown();
     flush();
-    const timeout = new Promise((done) => setTimeout(done, SHUTDOWN_FLUSH_TIMEOUT_MS).unref());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise((done) => (timer = setTimeout(done, SHUTDOWN_FLUSH_TIMEOUT_MS)));
     await Promise.race([Promise.allSettled(inFlight), timeout]);
+    clearTimeout(timer);
   };
 };
