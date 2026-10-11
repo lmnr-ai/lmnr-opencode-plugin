@@ -41,6 +41,19 @@ const prompt = (sessionID: string, text: string, metadata?: Record<string, unkno
     ...(metadata ? { metadata } : {}),
   }) as any;
 
+// Prompt hook followed by admission, in the order OpenCode V2 emits them.
+const submit = (
+  t: SessionTracer,
+  sessionID: string,
+  text: string,
+  metadata?: Record<string, unknown>,
+) => {
+  const p = prompt(sessionID, text, metadata);
+  t.onPrompt(p);
+  t.handle(ev("session.inbox.enqueued", { sessionID, inboxID: p.messageID, item: {} }));
+  return p.messageID as string;
+};
+
 const context = (sessionID: string, text: string) =>
   ({
     sessionID,
@@ -109,7 +122,7 @@ describe("SessionTracer", () => {
     let flushes = 0;
     const t = new SessionTracer(() => flushes++);
 
-    t.onPrompt(prompt("ses_root", "list the files and summarize"));
+    submit(t, "ses_root", "list the files and summarize");
     t.handle(ev("session.execution.started", { sessionID: "ses_root" }));
 
     t.onContext(context("ses_root", "list the files and summarize"), "primary");
@@ -130,7 +143,7 @@ describe("SessionTracer", () => {
       metadata: { sessionID: "ses_child", status: "running" },
     }));
 
-    t.onPrompt(prompt("ses_child", "summarize README"));
+    submit(t, "ses_child", "summarize README");
     t.handle(ev("session.execution.started", { sessionID: "ses_child" }));
     t.onContext(context("ses_child", "summarize README"), "primary");
     step(t, "ses_child", "msg_b1", { text: "README describes the plugin." });
@@ -208,7 +221,7 @@ describe("SessionTracer", () => {
   it("starts a new trace for each turn of the same session", () => {
     const t = new SessionTracer();
     for (const text of ["first", "second"]) {
-      t.onPrompt(prompt("ses_multi", text));
+      submit(t, "ses_multi", text);
       t.handle(ev("session.execution.started", { sessionID: "ses_multi" }));
       step(t, "ses_multi", `msg_${text}`, { text: `answer ${text}` });
       t.handle(ev("session.execution.succeeded", { sessionID: "ses_multi" }));
@@ -223,7 +236,7 @@ describe("SessionTracer", () => {
     const outer = Laminar.startSpan({ name: "caller" });
     const serialized = Laminar.serializeLaminarSpanContext(outer)!;
     const t = new SessionTracer();
-    t.onPrompt(prompt("ses_ext", "hi", { lmnrSpanContext: serialized }));
+    submit(t, "ses_ext", "hi", { lmnrSpanContext: serialized });
     t.handle(ev("session.execution.started", { sessionID: "ses_ext" }));
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_ext" }));
     outer.end();
@@ -234,7 +247,7 @@ describe("SessionTracer", () => {
 
   it("closes open spans with an error when the execution fails", () => {
     const t = new SessionTracer();
-    t.onPrompt(prompt("ses_fail", "do it"));
+    submit(t, "ses_fail", "do it");
     t.handle(ev("session.execution.started", { sessionID: "ses_fail" }));
     t.handle(ev("session.step.started", {
       sessionID: "ses_fail", assistantMessageID: "msg_f", agent: "build", model, started: clock,
@@ -255,5 +268,74 @@ describe("SessionTracer", () => {
     const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
     expect(parentId(llm!)).toBe(turn!.spanContext().spanId);
     expect(turn!.ended).toBe(true);
+  });
+  it("ignores prompts that were never admitted or were cancelled", () => {
+    const t = new SessionTracer();
+    t.onPrompt(prompt("ses_adm", "rejected by admission"));
+    const cancelled = submit(t, "ses_adm", "cancelled before delivery");
+    t.handle(ev("session.inbox.cancelled", { sessionID: "ses_adm", inboxID: cancelled }));
+    submit(t, "ses_adm", "the real prompt");
+    t.handle(ev("session.execution.started", { sessionID: "ses_adm" }));
+    t.handle(ev("session.execution.succeeded", { sessionID: "ses_adm" }));
+    const [turn] = byName("opencode turn");
+    expect(JSON.parse(attr(turn!, "lmnr.span.input") as string)).toMatchObject({
+      text: "the real prompt",
+    });
+  });
+
+  it("attaches steering prompts to the running turn and queued ones to the next", () => {
+    const t = new SessionTracer();
+    submit(t, "ses_q", "first");
+    t.handle(ev("session.execution.started", { sessionID: "ses_q" }));
+    const steer = submit(t, "ses_q", "steer into first");
+    t.handle(ev("session.inbox.delivered", { sessionID: "ses_q", inboxID: steer }));
+    const queued = submit(t, "ses_q", "queued for second");
+    t.handle(ev("session.execution.succeeded", { sessionID: "ses_q" }));
+    t.handle(ev("session.execution.started", { sessionID: "ses_q" }));
+    t.handle(ev("session.inbox.delivered", { sessionID: "ses_q", inboxID: queued }));
+    t.handle(ev("session.execution.succeeded", { sessionID: "ses_q" }));
+
+    const [first, second] = byName("opencode turn");
+    expect(JSON.parse(attr(first!, "lmnr.span.input") as string)).toMatchObject({ text: "first" });
+    expect(first!.events.map((e) => JSON.parse(e.attributes!["lmnr.span.input"] as string).text))
+      .toEqual(["steer into first"]);
+    expect(JSON.parse(attr(second!, "lmnr.span.input") as string)).toMatchObject({
+      text: "queued for second",
+    });
+    expect(second!.events).toHaveLength(0);
+  });
+
+  it("still ends the LLM span when token usage is partial", () => {
+    const t = new SessionTracer();
+    t.handle(ev("session.step.started", {
+      sessionID: "ses_tok", assistantMessageID: "msg_t", agent: "build", model, started: clock,
+    }));
+    t.handle(ev("session.step.ended", {
+      sessionID: "ses_tok", assistantMessageID: "msg_t", finish: "stop", cost: 0,
+      tokens: { input: 3, output: 4 },
+    }));
+    const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
+    expect(llm!.ended).toBe(true);
+    expect(attr(llm!, "gen_ai.usage.input_tokens")).toBe(3);
+  });
+
+  it("strips inline media from the captured request", () => {
+    const t = new SessionTracer();
+    const big = "x".repeat(100_000);
+    t.onContext({
+      ...context("ses_media", "look"),
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "look" },
+          { type: "media", media: { mime: "image/png", data: big }, filename: "a.png" },
+        ],
+      }],
+    }, "primary");
+    step(t, "ses_media", "msg_m", { text: "ok" });
+    const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
+    const input = attr(llm!, "lmnr.span.input") as string;
+    expect(input).not.toContain(big.slice(0, 1000));
+    expect(input).toContain("a.png");
   });
 });

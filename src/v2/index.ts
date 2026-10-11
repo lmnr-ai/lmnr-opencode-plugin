@@ -8,6 +8,10 @@ const log = (level: "info" | "warn" | "error", message: string) => {
   console[level === "info" ? "log" : level](`[laminar] ${message}`);
 };
 
+// Cap on how long plugin cleanup waits for exports, so a slow or unreachable
+// Laminar endpoint can't hold up OpenCode's shutdown.
+const SHUTDOWN_FLUSH_TIMEOUT_MS = 5_000;
+
 const stringOption = (value: unknown) =>
   typeof value === "string" && value.length > 0 ? value : undefined;
 
@@ -41,8 +45,15 @@ export const setupV2 = async (ctx: PluginContext) => {
     });
   }
 
+  // Turn-end flushes run in the background, but short-lived runs such as
+  // `opencode run` unload the plugin right after the last turn, so cleanup
+  // waits for any flush still in flight.
+  const inFlight = new Set<Promise<void>>();
   const flush = () => {
-    Laminar.flush().catch((error: unknown) => log("warn", `flush failed: ${String(error)}`));
+    const pending: Promise<void> = Laminar.flush()
+      .catch((error: unknown) => log("warn", `flush failed: ${String(error)}`))
+      .finally(() => inFlight.delete(pending));
+    inFlight.add(pending);
   };
   const tracer = new SessionTracer(flush);
 
@@ -70,6 +81,15 @@ export const setupV2 = async (ctx: PluginContext) => {
   return async () => {
     controller.abort();
     tracer.shutdown();
-    await Laminar.flush();
+    flush();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        log("warn", "timed out flushing spans on shutdown");
+        resolve();
+      }, SHUTDOWN_FLUSH_TIMEOUT_MS);
+    });
+    await Promise.race([Promise.allSettled([...inFlight]), timeout]);
+    clearTimeout(timer);
   };
 };
