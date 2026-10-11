@@ -16,13 +16,7 @@ import type { OpenCodeEvent, SessionContextHook, SessionPromptHook } from "./typ
 const SPAWNING_TOOL_NAMES = new Set(["subagent", "task"]);
 
 const SPAN_INPUT = "lmnr.span.input";
-const MAX_PROMPT_DRAFTS = 32;
 const SPAN_OUTPUT = "lmnr.span.output";
-
-interface RequestSnapshot {
-  messages: AiSdkMessage[];
-  tools: string[];
-}
 
 interface StepState {
   span: Span;
@@ -56,8 +50,8 @@ interface SessionState {
   promptDrafts: Map<string, PromptRecord>;
   pendingPrompts: PromptRecord[];
   pendingSynthetic?: string | undefined;
-  pendingRequest?: RequestSnapshot | undefined;
-  pendingCompaction?: RequestSnapshot | undefined;
+  pendingRequest?: AiSdkMessage[] | undefined;
+  pendingCompaction?: AiSdkMessage[] | undefined;
   externalContext?: string;
   steps: Map<string, StepState>;
   tools: Map<string, ToolState>;
@@ -84,10 +78,10 @@ const joinOrdinals = (parts: Map<number, string>) =>
     .join("");
 
 interface TokenUsage {
-  input?: number;
-  output?: number;
-  reasoning?: number;
-  cache?: { read?: number; write?: number };
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: { read: number; write: number };
 }
 
 // V2 token buckets are disjoint. OTel's gen_ai.usage.input_tokens includes
@@ -95,17 +89,14 @@ interface TokenUsage {
 const usageAttributes = (tokens: TokenUsage | undefined, cost: number | undefined) => {
   const attributes: Record<string, number> = {};
   if (tokens) {
-    const cacheRead = tokens.cache?.read ?? 0;
-    const cacheWrite = tokens.cache?.write ?? 0;
-    const reasoning = tokens.reasoning ?? 0;
-    const input = (tokens.input ?? 0) + cacheRead + cacheWrite;
-    const output = (tokens.output ?? 0) + reasoning;
+    const input = tokens.input + tokens.cache.read + tokens.cache.write;
+    const output = tokens.output + tokens.reasoning;
     attributes[LaminarAttributes.INPUT_TOKEN_COUNT] = input;
     attributes[LaminarAttributes.OUTPUT_TOKEN_COUNT] = output;
     attributes[LaminarAttributes.TOTAL_TOKEN_COUNT] = input + output;
-    attributes["gen_ai.usage.reasoning_tokens"] = reasoning;
-    attributes["gen_ai.usage.cache_read_input_tokens"] = cacheRead;
-    attributes["gen_ai.usage.cache_creation_input_tokens"] = cacheWrite;
+    attributes["gen_ai.usage.reasoning_tokens"] = tokens.reasoning;
+    attributes["gen_ai.usage.cache_read_input_tokens"] = tokens.cache.read;
+    attributes["gen_ai.usage.cache_creation_input_tokens"] = tokens.cache.write;
   }
   if (typeof cost === "number") attributes[LaminarAttributes.TOTAL_COST] = cost;
   return attributes;
@@ -132,41 +123,40 @@ export class SessionTracer {
     return state;
   }
 
-  private rootSessionId(state: SessionState): string {
-    const seen = new Set<string>();
-    let current = state;
-    while (current.parentID && !seen.has(current.id)) {
-      seen.add(current.id);
-      const parent = this.sessions.get(current.parentID);
-      if (!parent) return current.parentID;
-      current = parent;
+  // The session followed by its known ancestors.
+  private *lineage(state: SessionState) {
+    for (
+      let current: SessionState | undefined = state;
+      current;
+      current = current.parentID ? this.sessions.get(current.parentID) : undefined
+    ) {
+      yield current;
     }
-    return current.id;
   }
 
-  private parentContext(state: SessionState, seen = new Set<string>()): Context | undefined {
-    if (state.turn) return trace.setSpan(ROOT_CONTEXT, state.turn);
-    if (state.spawn) return trace.setSpan(ROOT_CONTEXT, state.spawn.span);
-    if (state.parentID && !seen.has(state.id)) {
-      seen.add(state.id);
-      const parent = this.sessions.get(state.parentID);
-      if (parent) return this.parentContext(parent, seen);
+  private rootSessionId(state: SessionState): string {
+    let root = state;
+    for (const current of this.lineage(state)) root = current;
+    return root.parentID ?? root.id;
+  }
+
+  // Spans attach to the nearest open turn or spawning tool call up the chain.
+  private parentContext(state: SessionState): Context {
+    for (const current of this.lineage(state)) {
+      const span = current.turn ?? current.spawn?.span;
+      if (span) return trace.setSpan(ROOT_CONTEXT, span);
     }
-    return undefined;
+    return ROOT_CONTEXT;
   }
 
   // Spans inside a subagent carry the spawning tool call, like the V1 plugin.
-  private spawnAttributes(state: SessionState, seen = new Set<string>()): Record<string, string> {
-    if (state.spawn) {
+  private spawnAttributes(state: SessionState): Record<string, string> {
+    for (const { spawn } of this.lineage(state)) {
+      if (!spawn) continue;
       return {
-        "lmnr.spawning_subagent.span_id": otelSpanIdToUUID(state.spawn.span.spanContext().spanId),
-        "lmnr.spawning_subagent.tool_use_id": state.spawn.toolCallId,
+        "lmnr.spawning_subagent.span_id": otelSpanIdToUUID(spawn.span.spanContext().spanId),
+        "lmnr.spawning_subagent.tool_use_id": spawn.toolCallId,
       };
-    }
-    if (state.parentID && !seen.has(state.id)) {
-      seen.add(state.id);
-      const parent = this.sessions.get(state.parentID);
-      if (parent) return this.spawnAttributes(parent, seen);
     }
     return {};
   }
@@ -196,7 +186,7 @@ export class SessionTracer {
       ...(options.input !== undefined ? { input: options.input } : {}),
       ...(options.startTime !== undefined ? { startTime: options.startTime } : {}),
       sessionId: this.rootSessionId(state),
-      context: this.parentContext(state) ?? ROOT_CONTEXT,
+      context: this.parentContext(state),
     });
     span.setAttributes({ ...this.spawnAttributes(state), ...options.attributes });
     return span;
@@ -263,12 +253,7 @@ export class SessionTracer {
 
   onPrompt(event: SessionPromptHook) {
     const external = event.metadata?.lmnrSpanContext;
-    const { promptDrafts } = this.session(event.sessionID);
-    // Drafts that are never admitted are never removed; keep only the newest.
-    if (promptDrafts.size >= MAX_PROMPT_DRAFTS) {
-      promptDrafts.delete(promptDrafts.keys().next().value!);
-    }
-    promptDrafts.set(event.messageID, {
+    this.session(event.sessionID).promptDrafts.set(event.messageID, {
       messageID: event.messageID,
       input: {
         sessionID: event.sessionID,
@@ -286,10 +271,8 @@ export class SessionTracer {
     const state = this.session(event.sessionID);
     // Convert now (which drops inline media) and copy only the converted
     // result: later hooks may mutate the request, and media can be huge.
-    const snapshot: RequestSnapshot = {
-      messages: clone(toAiSdkMessages(event.system, event.messages as unknown as RequestMessage[])),
-      tools: Object.keys(event.tools ?? {}),
-    };
+    const messages = event.messages as unknown as RequestMessage[];
+    const snapshot = clone(toAiSdkMessages(event.system, messages));
     if (kind === "primary") state.pendingRequest = snapshot;
     else state.pendingCompaction = snapshot;
   }
@@ -359,32 +342,22 @@ export class SessionTracer {
           `interrupted: ${event.data.reason}`,
         );
         break;
-      case "session.idle": {
-        const state = this.sessions.get(event.data.sessionID);
-        if (state?.turn) this.endTurn(state, event.created);
-        break;
-      }
       case "session.step.started": {
         const state = this.session(event.data.sessionID);
-        const previous = state.steps.get(event.data.assistantMessageID);
-        if (previous) {
-          previous.span.setStatus({ code: SpanStatusCode.ERROR, message: "step restarted" });
-          previous.span.end(event.created);
-        }
+        state.steps.get(event.data.assistantMessageID)?.span.end(event.created);
         const request = state.pendingRequest;
         state.pendingRequest = undefined;
         const { model } = event.data;
         const span = this.startSpan(state, `ai.llm ${model.providerID}:${model.id}`, {
           spanType: "LLM",
           startTime: event.data.started,
-          ...(request ? { input: request.messages } : {}),
+          ...(request ? { input: request } : {}),
           attributes: {
             [LaminarAttributes.PROVIDER]: model.providerID,
             [LaminarAttributes.REQUEST_MODEL]: model.id,
             [LaminarAttributes.RESPONSE_MODEL]: model.id,
             "opencode.agent": event.data.agent,
             ...(model.variant ? { "opencode.model.variant": model.variant } : {}),
-            ...(request?.tools.length ? { "opencode.tools": JSON.stringify(request.tools) } : {}),
           },
         });
         state.steps.set(event.data.assistantMessageID, {
@@ -415,33 +388,29 @@ export class SessionTracer {
         const step = state?.steps.get(event.data.assistantMessageID);
         if (!state || !step) break;
         state.steps.delete(event.data.assistantMessageID);
-        // The step is no longer tracked, so end it even if annotating throws.
-        try {
-          const text = joinOrdinals(step.text);
-          const reasoning = joinOrdinals(step.reasoning);
-          if (text.length > 0) {
-            step.span.setAttribute(SPAN_OUTPUT, text);
-            state.lastText = text;
-          } else if (step.toolCalls.length > 0) {
-            step.span.setAttribute(SPAN_OUTPUT, JSON.stringify(step.toolCalls));
-          }
-          const output = toOutputMessages(text, reasoning, step.toolCalls);
-          if (output.length > 0) {
-            step.span.setAttribute("gen_ai.output.messages", JSON.stringify(output));
-          }
-          step.span.setAttributes(usageAttributes(event.data.tokens, event.data.cost));
-          if (event.data.finish) {
-            step.span.setAttribute("gen_ai.response.finish_reason", event.data.finish);
-          }
-          if (event.type === "session.step.failed") {
-            step.span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: errorMessage(event.data.error),
-            });
-          }
-        } finally {
-          step.span.end(event.created);
+        const text = joinOrdinals(step.text);
+        const reasoning = joinOrdinals(step.reasoning);
+        if (text.length > 0) {
+          step.span.setAttribute(SPAN_OUTPUT, text);
+          state.lastText = text;
+        } else if (step.toolCalls.length > 0) {
+          step.span.setAttribute(SPAN_OUTPUT, JSON.stringify(step.toolCalls));
         }
+        const output = toOutputMessages(text, reasoning, step.toolCalls);
+        if (output.length > 0) {
+          step.span.setAttribute("gen_ai.output.messages", JSON.stringify(output));
+        }
+        step.span.setAttributes(usageAttributes(event.data.tokens, event.data.cost));
+        if (event.data.finish) {
+          step.span.setAttribute("gen_ai.response.finish_reason", event.data.finish);
+        }
+        if (event.type === "session.step.failed") {
+          step.span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: errorMessage(event.data.error),
+          });
+        }
+        step.span.end(event.created);
         break;
       }
       case "session.tool.input.started": {
@@ -458,11 +427,7 @@ export class SessionTracer {
           spanType: "TOOL",
           input: event.data.input,
           startTime: event.created,
-          attributes: {
-            "ai.toolCall.id": event.data.id,
-            "ai.toolCall.name": name,
-            "opencode.tool.executed": event.data.executed,
-          },
+          attributes: { "ai.toolCall.id": event.data.id },
         });
         state.tools.set(event.data.id, { span, name });
         break;
@@ -484,20 +449,17 @@ export class SessionTracer {
         if (!state || !tool) break;
         state.tools.delete(event.data.id);
         state.toolNames.delete(event.data.id);
-        try {
-          if (event.data.content) {
-            const output = toolContentText(event.data.content);
-            tool.span.setAttribute(SPAN_OUTPUT, JSON.stringify(output));
-          }
-          if (event.type === "session.tool.failed") {
-            tool.span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: errorMessage(event.data.error),
-            });
-          }
-        } finally {
-          tool.span.end(event.created);
+        if (event.data.content) {
+          const output = toolContentText(event.data.content);
+          tool.span.setAttribute(SPAN_OUTPUT, JSON.stringify(output));
         }
+        if (event.type === "session.tool.failed") {
+          tool.span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: errorMessage(event.data.error),
+          });
+        }
+        tool.span.end(event.created);
         break;
       }
       case "session.compaction.started": {
@@ -507,7 +469,7 @@ export class SessionTracer {
         state.compaction = this.startSpan(state, "opencode compaction", {
           spanType: "LLM",
           startTime: event.created,
-          ...(request ? { input: request.messages } : {}),
+          ...(request ? { input: request } : {}),
           attributes: { "opencode.compaction.reason": event.data.reason },
         });
         break;
@@ -518,28 +480,25 @@ export class SessionTracer {
         const span = state?.compaction;
         if (!state || !span) break;
         state.compaction = undefined;
-        try {
-          span.setAttributes(usageAttributes(event.data.tokens, event.data.cost));
-          if (event.type === "session.compaction.ended") {
-            span.setAttribute(SPAN_OUTPUT, event.data.text);
-            const { model } = event.data;
-            if (model) {
-              span.setAttribute(LaminarAttributes.PROVIDER, model.providerID);
-              span.setAttribute(LaminarAttributes.REQUEST_MODEL, model.id);
-              span.setAttribute(LaminarAttributes.RESPONSE_MODEL, model.id);
-            }
-          } else {
-            span.setStatus({ code: SpanStatusCode.ERROR, message: errorMessage(event.data.error) });
+        span.setAttributes(usageAttributes(event.data.tokens, event.data.cost));
+        if (event.type === "session.compaction.ended") {
+          span.setAttribute(SPAN_OUTPUT, event.data.text);
+          const { model } = event.data;
+          if (model) {
+            span.setAttribute(LaminarAttributes.PROVIDER, model.providerID);
+            span.setAttribute(LaminarAttributes.REQUEST_MODEL, model.id);
+            span.setAttribute(LaminarAttributes.RESPONSE_MODEL, model.id);
           }
-        } finally {
-          span.end(event.created);
+        } else {
+          span.setStatus({ code: SpanStatusCode.ERROR, message: errorMessage(event.data.error) });
         }
+        span.end(event.created);
         break;
       }
       case "session.deleted": {
         const state = this.sessions.get(event.data.sessionID);
         if (!state) break;
-        this.endTurn(state, event.created, state.turn ? "session deleted" : undefined);
+        this.endTurn(state, event.created, "session deleted");
         this.sessions.delete(event.data.sessionID);
         break;
       }
@@ -548,15 +507,7 @@ export class SessionTracer {
 
   // Ends everything still open, e.g. when the plugin unloads.
   shutdown(reason = "plugin unloaded") {
-    const now = Date.now();
-    for (const state of this.sessions.values()) {
-      this.endOpenSpans(state, now, reason);
-      if (state.turn) {
-        state.turn.setStatus({ code: SpanStatusCode.ERROR, message: reason });
-        state.turn.end(now);
-        state.turn = undefined;
-      }
-    }
+    for (const state of this.sessions.values()) this.endTurn(state, Date.now(), reason);
     this.sessions.clear();
   }
 }

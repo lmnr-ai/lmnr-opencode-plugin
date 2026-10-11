@@ -82,14 +82,7 @@ export const setupV2 = async (ctx: PluginContext) => {
     controller.abort();
     tracer.shutdown();
     flush();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        log("warn", "timed out flushing spans on shutdown");
-        resolve();
-      }, SHUTDOWN_FLUSH_TIMEOUT_MS);
-    });
-    await Promise.race([Promise.allSettled([...inFlight]), timeout]);
-    clearTimeout(timer);
+    const timeout = new Promise((done) => setTimeout(done, SHUTDOWN_FLUSH_TIMEOUT_MS).unref());
+    await Promise.race([Promise.allSettled(inFlight), timeout]);
   };
 };

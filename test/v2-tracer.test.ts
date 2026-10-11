@@ -263,7 +263,7 @@ describe("SessionTracer", () => {
   it("traces spans that arrive without a prompt (plugin loaded mid-execution)", () => {
     const t = new SessionTracer();
     step(t, "ses_late", "msg_l", { text: "late" });
-    t.handle(ev("session.idle", { sessionID: "ses_late" }));
+    t.handle(ev("session.execution.succeeded", { sessionID: "ses_late" }));
     const [turn] = byName("opencode turn");
     const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
     expect(parentId(llm!)).toBe(turn!.spanContext().spanId);
@@ -303,20 +303,6 @@ describe("SessionTracer", () => {
       text: "queued for second",
     });
     expect(second!.events).toHaveLength(0);
-  });
-
-  it("still ends the LLM span when token usage is partial", () => {
-    const t = new SessionTracer();
-    t.handle(ev("session.step.started", {
-      sessionID: "ses_tok", assistantMessageID: "msg_t", agent: "build", model, started: clock,
-    }));
-    t.handle(ev("session.step.ended", {
-      sessionID: "ses_tok", assistantMessageID: "msg_t", finish: "stop", cost: 0,
-      tokens: { input: 3, output: 4 },
-    }));
-    const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
-    expect(llm!.ended).toBe(true);
-    expect(attr(llm!, "gen_ai.usage.input_tokens")).toBe(3);
   });
 
   it("strips inline media from the captured request", () => {
