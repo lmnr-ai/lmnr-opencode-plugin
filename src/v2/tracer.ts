@@ -16,6 +16,7 @@ import type { OpenCodeEvent, SessionContextHook, SessionPromptHook } from "./typ
 const SPAWNING_TOOL_NAMES = new Set(["subagent", "task"]);
 
 const SPAN_INPUT = "lmnr.span.input";
+const MAX_PROMPT_DRAFTS = 32;
 const SPAN_OUTPUT = "lmnr.span.output";
 
 interface RequestSnapshot {
@@ -226,10 +227,10 @@ export class SessionTracer {
   }
 
   private endTurn(state: SessionState, endTime: number, error?: string) {
+    // Pending prompts, drafts and request snapshots are left alone: hooks reach
+    // the plugin directly while events are streamed, so state for the next
+    // turn can arrive before this turn's end event.
     this.endOpenSpans(state, endTime, error ?? "turn ended before span completed");
-    state.pendingRequest = undefined;
-    state.pendingCompaction = undefined;
-    state.promptDrafts.clear();
     if (!state.turn) return;
     if (state.lastText !== undefined) {
       state.turn.setAttribute(SPAN_OUTPUT, state.lastText);
@@ -262,7 +263,12 @@ export class SessionTracer {
 
   onPrompt(event: SessionPromptHook) {
     const external = event.metadata?.lmnrSpanContext;
-    this.session(event.sessionID).promptDrafts.set(event.messageID, {
+    const { promptDrafts } = this.session(event.sessionID);
+    // Drafts that are never admitted are never removed; keep only the newest.
+    if (promptDrafts.size >= MAX_PROMPT_DRAFTS) {
+      promptDrafts.delete(promptDrafts.keys().next().value!);
+    }
+    promptDrafts.set(event.messageID, {
       messageID: event.messageID,
       input: {
         sessionID: event.sessionID,

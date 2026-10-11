@@ -338,4 +338,30 @@ describe("SessionTracer", () => {
     expect(input).not.toContain(big.slice(0, 1000));
     expect(input).toContain("a.png");
   });
+  it("keeps next-turn state that arrives before the previous turn's end event", () => {
+    const t = new SessionTracer();
+    submit(t, "ses_race", "first");
+    t.handle(ev("session.execution.started", { sessionID: "ses_race" }));
+    step(t, "ses_race", "msg_r1", { text: "one" });
+    // The next prompt's hook and the next step's context hook run before the
+    // stream delivers the end of the first turn.
+    const p = prompt("ses_race", "second");
+    t.onPrompt(p);
+    t.onContext(context("ses_race", "second"), "primary");
+    t.handle(ev("session.execution.succeeded", { sessionID: "ses_race" }));
+    t.handle(ev("session.inbox.enqueued", { sessionID: "ses_race", inboxID: p.messageID, item: {} }));
+    t.handle(ev("session.execution.started", { sessionID: "ses_race" }));
+    step(t, "ses_race", "msg_r2", { text: "two" });
+    t.handle(ev("session.execution.succeeded", { sessionID: "ses_race" }));
+
+    const [, second] = byName("opencode turn");
+    expect(JSON.parse(attr(second!, "lmnr.span.input") as string)).toMatchObject({ text: "second" });
+    const llm = byName("ai.llm anthropic:claude-sonnet-4-5").find(
+      (s) => attr(s, "lmnr.span.output") === "two",
+    )!;
+    expect(JSON.parse(attr(llm, "lmnr.span.input") as string)).toContainEqual({
+      role: "user",
+      content: [{ type: "text", text: "second" }],
+    });
+  });
 });
