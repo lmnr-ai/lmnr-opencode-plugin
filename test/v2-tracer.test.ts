@@ -199,7 +199,8 @@ describe("SessionTracer", () => {
     }]);
     assert.equal(attr(first, "gen_ai.usage.input_tokens"), 160);
     assert.equal(attr(first, "gen_ai.usage.output_tokens"), 25);
-    assert.equal(attr(first, "gen_ai.usage.cache_read_input_tokens"), 50);
+    assert.equal(attr(first, "gen_ai.usage.cache_read.input_tokens"), 50);
+    assert.deepEqual(attr(first, "gen_ai.response.finish_reasons"), ["tool-calls"]);
     assert.equal(attr(first, "gen_ai.usage.cost"), 0.0123);
     assert.equal(attr(first, "gen_ai.system"), "anthropic");
     assert.equal(attr(first, "gen_ai.request.model"), "claude-sonnet-4-5");

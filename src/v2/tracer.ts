@@ -2,7 +2,7 @@ import { Laminar, LaminarAttributes } from "@lmnr-ai/lmnr";
 import { type Context, ROOT_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 
 import { otelSpanIdToUUID } from "../utils";
-import { type Message, requestMessages, responseMessages, type ToolCall } from "./messages";
+import { requestMessages, responseMessages, type ToolCall } from "./messages";
 import type { OpenCodeEvent, SessionContextHook, SessionPromptHook } from "./types";
 
 // Tools that start a child session. V2 calls it `subagent`; `task` is the V1 name.
@@ -46,17 +46,15 @@ interface SessionState {
   promptDrafts: Map<string, PromptRecord>;
   pendingPrompts: PromptRecord[];
   pendingSynthetic?: string | undefined;
-  pendingRequest?: Message[] | undefined;
+  pendingRequest?: string | undefined;
   pendingTools?: string | undefined;
-  pendingCompaction?: Message[] | undefined;
+  pendingCompaction?: string | undefined;
   externalContext?: string;
   steps: Map<string, StepState>;
   tools: Map<string, ToolState>;
   toolNames: Map<string, string>;
   compaction?: Span | undefined;
 }
-
-const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value ?? null)) as T;
 
 // Laminar treats a span as failed only when it has an exception event.
 const fail = (span: Span, message: string) => {
@@ -88,8 +86,8 @@ const usageAttributes = (tokens: TokenUsage | undefined, cost: number | undefine
     attributes[LaminarAttributes.OUTPUT_TOKEN_COUNT] = output;
     attributes[LaminarAttributes.TOTAL_TOKEN_COUNT] = input + output;
     attributes["gen_ai.usage.reasoning_tokens"] = tokens.reasoning;
-    attributes["gen_ai.usage.cache_read_input_tokens"] = tokens.cache.read;
-    attributes["gen_ai.usage.cache_creation_input_tokens"] = tokens.cache.write;
+    attributes["gen_ai.usage.cache_read.input_tokens"] = tokens.cache.read;
+    attributes["gen_ai.usage.cache_creation.input_tokens"] = tokens.cache.write;
   }
   if (typeof cost === "number") attributes[LaminarAttributes.TOTAL_COST] = cost;
   return attributes;
@@ -251,8 +249,8 @@ export class SessionTracer {
       input: {
         sessionID: event.sessionID,
         messageID: event.messageID,
-        ...clone(event.prompt),
-        ...(event.metadata ? { metadata: clone(event.metadata) } : {}),
+        ...event.prompt,
+        ...(event.metadata ? { metadata: event.metadata } : {}),
       },
       ...(typeof external === "string" && external.length > 0
         ? { externalContext: external }
@@ -262,8 +260,9 @@ export class SessionTracer {
 
   onContext(event: SessionContextHook, kind: "primary" | "compaction") {
     const state = this.session(event.sessionID);
-    // Copy: later hooks may mutate the request.
-    const snapshot = clone(requestMessages(event.system, event.messages));
+    // Serialize now: OpenCode passes the same draft through every plugin's
+    // hook, and the span that records it starts later.
+    const snapshot = JSON.stringify(requestMessages(event.system, event.messages));
     if (kind === "compaction") {
       state.pendingCompaction = snapshot;
       return;
@@ -407,7 +406,7 @@ export class SessionTracer {
         if (output.length > 0) step.span.setAttribute(SPAN_OUTPUT, JSON.stringify(output));
         step.span.setAttributes(usageAttributes(event.data.tokens, event.data.cost));
         if (event.data.finish) {
-          step.span.setAttribute("gen_ai.response.finish_reason", event.data.finish);
+          step.span.setAttribute("gen_ai.response.finish_reasons", [event.data.finish]);
         }
         if (event.type === "session.step.failed") {
           fail(step.span, event.data.error.message);
