@@ -15,6 +15,7 @@ export default tseslint.config(
       "**/*.min.js",
       "tsdown.config.mts",
       "eslint.config.mjs",
+      "test/**",
     ],
   },
   {

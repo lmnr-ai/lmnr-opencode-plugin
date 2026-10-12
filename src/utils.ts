@@ -22,9 +22,10 @@ export const otelSpanIdToUUID = (spanId: string): string => {
 export const loadEnv = (options?: {
   quiet?: boolean;
   paths?: string[];
+  dir?: string;
 }): void => {
   const nodeEnv = process.env.NODE_ENV || "development";
-  const envDir = process.cwd();
+  const envDir = options?.dir ?? process.cwd();
 
   // Files to load in order (lowest to highest priority)
   // Later files override earlier ones
