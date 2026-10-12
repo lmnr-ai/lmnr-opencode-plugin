@@ -46,7 +46,7 @@ If `LMNR_PROJECT_API_KEY` is not set, the plugin does nothing.
 
 ## How it works
 
-**OpenCode V2.** The plugin subscribes to OpenCode's event stream and builds the spans itself: one span per model step (with the request messages, the response, token usage and cost) and one per tool call. It reads each step's messages from the `context` session hook. V2 removed the `experimental.openTelemetry` flag, so the plugin doesn't use it.
+**OpenCode V2.** The plugin subscribes to OpenCode's event stream and builds the spans itself: one span per model step (with the request messages, the response, token usage and cost) and one per tool call. It reads each step's messages from the `context` session hook and records them in OpenCode's own message format. V2 removed the `experimental.openTelemetry` flag, so the plugin doesn't use it.
 
 **OpenCode V1.** The plugin turns on OpenCode's experimental OpenTelemetry flag and adds a Laminar span processor. The processor saves each conversation turn as its own trace, groups traces by session ID, and adds the attributes that power Laminar-specific features.
 

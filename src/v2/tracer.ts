@@ -2,14 +2,7 @@ import { Laminar, LaminarAttributes } from "@lmnr-ai/lmnr";
 import { type Context, ROOT_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 
 import { otelSpanIdToUUID } from "../utils";
-import {
-  type AiSdkMessage,
-  type RequestMessage,
-  toAiSdkMessages,
-  type ToolCall,
-  toolContentText,
-  toOutputMessages,
-} from "./messages";
+import { type Message, requestMessages, responseMessages, type ToolCall } from "./messages";
 import type { OpenCodeEvent, SessionContextHook, SessionPromptHook } from "./types";
 
 // Tools that start a child session. V2 calls it `subagent`; `task` is the V1 name.
@@ -23,6 +16,9 @@ interface StepState {
   text: Map<number, string>;
   reasoning: Map<number, string>;
   toolCalls: ToolCall[];
+  // When the response finished streaming; the step itself ends only after
+  // its tool calls settle, which would stretch the LLM span over them.
+  streamed?: number;
 }
 
 interface ToolState {
@@ -50,8 +46,9 @@ interface SessionState {
   promptDrafts: Map<string, PromptRecord>;
   pendingPrompts: PromptRecord[];
   pendingSynthetic?: string | undefined;
-  pendingRequest?: AiSdkMessage[] | undefined;
-  pendingCompaction?: AiSdkMessage[] | undefined;
+  pendingRequest?: Message[] | undefined;
+  pendingTools?: string | undefined;
+  pendingCompaction?: Message[] | undefined;
   externalContext?: string;
   steps: Map<string, StepState>;
   tools: Map<string, ToolState>;
@@ -61,14 +58,10 @@ interface SessionState {
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value ?? null)) as T;
 
-const errorMessage = (error: unknown): string => {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") {
-    const record = error as { message?: unknown; data?: { message?: unknown } };
-    if (typeof record.message === "string") return record.message;
-    if (typeof record.data?.message === "string") return record.data.message;
-  }
-  return JSON.stringify(error);
+// Laminar treats a span as failed only when it has an exception event.
+const fail = (span: Span, message: string) => {
+  span.setStatus({ code: SpanStatusCode.ERROR, message });
+  span.recordException({ name: "Error", message });
 };
 
 const joinOrdinals = (parts: Map<number, string>) =>
@@ -225,7 +218,7 @@ export class SessionTracer {
     if (state.lastText !== undefined) {
       state.turn.setAttribute(SPAN_OUTPUT, state.lastText);
     }
-    if (error) state.turn.setStatus({ code: SpanStatusCode.ERROR, message: error });
+    if (error) fail(state.turn, error);
     state.turn.end(endTime);
     state.turn = undefined;
     this.onTurnEnd();
@@ -233,17 +226,17 @@ export class SessionTracer {
 
   private endOpenSpans(state: SessionState, endTime: number, reason: string) {
     for (const step of state.steps.values()) {
-      step.span.setStatus({ code: SpanStatusCode.ERROR, message: reason });
+      fail(step.span, reason);
       step.span.end(endTime);
     }
     state.steps.clear();
     for (const tool of state.tools.values()) {
-      tool.span.setStatus({ code: SpanStatusCode.ERROR, message: reason });
+      fail(tool.span, reason);
       tool.span.end(endTime);
     }
     state.tools.clear();
     if (state.compaction) {
-      state.compaction.setStatus({ code: SpanStatusCode.ERROR, message: reason });
+      fail(state.compaction, reason);
       state.compaction.end(endTime);
       state.compaction = undefined;
     }
@@ -269,12 +262,22 @@ export class SessionTracer {
 
   onContext(event: SessionContextHook, kind: "primary" | "compaction") {
     const state = this.session(event.sessionID);
-    // Convert now (which drops inline media) and copy only the converted
-    // result: later hooks may mutate the request, and media can be huge.
-    const messages = event.messages as unknown as RequestMessage[];
-    const snapshot = clone(toAiSdkMessages(event.system, messages));
-    if (kind === "primary") state.pendingRequest = snapshot;
-    else state.pendingCompaction = snapshot;
+    // Copy: later hooks may mutate the request.
+    const snapshot = clone(requestMessages(event.system, event.messages));
+    if (kind === "compaction") {
+      state.pendingCompaction = snapshot;
+      return;
+    }
+    state.pendingRequest = snapshot;
+    // Laminar reads tool definitions from `gen_ai.tool.definitions`.
+    state.pendingTools = JSON.stringify(
+      Object.entries(event.tools).map(([name, tool]) => ({
+        type: "function",
+        name,
+        description: tool.description,
+        parameters: tool.input,
+      })),
+    );
   }
 
   // ---- events ----
@@ -332,7 +335,7 @@ export class SessionTracer {
         this.endTurn(
           this.session(event.data.sessionID),
           event.created,
-          errorMessage(event.data.error),
+          event.data.error.message,
         );
         break;
       case "session.execution.interrupted":
@@ -345,8 +348,9 @@ export class SessionTracer {
       case "session.step.started": {
         const state = this.session(event.data.sessionID);
         state.steps.get(event.data.assistantMessageID)?.span.end(event.created);
-        const request = state.pendingRequest;
+        const { pendingRequest: request, pendingTools: tools } = state;
         state.pendingRequest = undefined;
+        state.pendingTools = undefined;
         const { model } = event.data;
         const span = this.startSpan(state, `ai.llm ${model.providerID}:${model.id}`, {
           spanType: "LLM",
@@ -357,6 +361,7 @@ export class SessionTracer {
             [LaminarAttributes.REQUEST_MODEL]: model.id,
             [LaminarAttributes.RESPONSE_MODEL]: model.id,
             "opencode.agent": event.data.agent,
+            ...(tools ? { "gen_ai.tool.definitions": tools } : {}),
             ...(model.variant ? { "opencode.model.variant": model.variant } : {}),
           },
         });
@@ -382,6 +387,13 @@ export class SessionTracer {
         step?.reasoning.set(event.data.ordinal, event.data.text);
         break;
       }
+      case "session.step.streamed": {
+        const step = this.sessions
+          .get(event.data.sessionID)
+          ?.steps.get(event.data.assistantMessageID);
+        if (step) step.streamed = event.created;
+        break;
+      }
       case "session.step.ended":
       case "session.step.failed": {
         const state = this.sessions.get(event.data.sessionID);
@@ -390,27 +402,17 @@ export class SessionTracer {
         state.steps.delete(event.data.assistantMessageID);
         const text = joinOrdinals(step.text);
         const reasoning = joinOrdinals(step.reasoning);
-        if (text.length > 0) {
-          step.span.setAttribute(SPAN_OUTPUT, text);
-          state.lastText = text;
-        } else if (step.toolCalls.length > 0) {
-          step.span.setAttribute(SPAN_OUTPUT, JSON.stringify(step.toolCalls));
-        }
-        const output = toOutputMessages(text, reasoning, step.toolCalls);
-        if (output.length > 0) {
-          step.span.setAttribute("gen_ai.output.messages", JSON.stringify(output));
-        }
+        if (text.length > 0) state.lastText = text;
+        const output = responseMessages(text, reasoning, step.toolCalls);
+        if (output.length > 0) step.span.setAttribute(SPAN_OUTPUT, JSON.stringify(output));
         step.span.setAttributes(usageAttributes(event.data.tokens, event.data.cost));
         if (event.data.finish) {
           step.span.setAttribute("gen_ai.response.finish_reason", event.data.finish);
         }
         if (event.type === "session.step.failed") {
-          step.span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: errorMessage(event.data.error),
-          });
+          fail(step.span, event.data.error.message);
         }
-        step.span.end(event.created);
+        step.span.end(step.streamed ?? event.created);
         break;
       }
       case "session.tool.input.started": {
@@ -422,7 +424,7 @@ export class SessionTracer {
         const name = state.toolNames.get(event.data.id) ?? "tool";
         state.steps
           .get(event.data.assistantMessageID)
-          ?.toolCalls.push({ id: event.data.id, name, input: event.data.input });
+          ?.toolCalls.push({ type: "tool-call", id: event.data.id, name, input: event.data.input });
         const span = this.startSpan(state, name, {
           spanType: "TOOL",
           input: event.data.input,
@@ -452,14 +454,10 @@ export class SessionTracer {
         state.tools.delete(event.data.id);
         state.toolNames.delete(event.data.id);
         if (event.data.content) {
-          const output = toolContentText(event.data.content);
-          tool.span.setAttribute(SPAN_OUTPUT, JSON.stringify(output));
+          tool.span.setAttribute(SPAN_OUTPUT, JSON.stringify(event.data.content));
         }
         if (event.type === "session.tool.failed") {
-          tool.span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: errorMessage(event.data.error),
-          });
+          fail(tool.span, event.data.error.message);
         }
         tool.span.end(event.created);
         break;
@@ -492,7 +490,7 @@ export class SessionTracer {
             span.setAttribute(LaminarAttributes.RESPONSE_MODEL, model.id);
           }
         } else {
-          span.setStatus({ code: SpanStatusCode.ERROR, message: errorMessage(event.data.error) });
+          fail(span, event.data.error.message);
         }
         span.end(event.created);
         break;

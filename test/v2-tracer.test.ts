@@ -107,6 +107,9 @@ const byName = (name: string) => spans().filter((s) => s.name === name);
 const parentId = (span: ReadableSpan) =>
   (span as any).parentSpanContext?.spanId ?? (span as any).parentSpanId;
 const attr = (span: ReadableSpan, key: string) => span.attributes[key];
+const outputText = (span: ReadableSpan) =>
+  JSON.parse((attr(span, "lmnr.span.output") as string) ?? "[]")[0]?.content
+    .find((part: { type: string }) => part.type === "text")?.text;
 const SESSION_ID = "lmnr.association.properties.session_id";
 
 describe("default export", () => {
@@ -178,19 +181,19 @@ describe("SessionTracer", () => {
     expect(parentId(bash!)).toBe(turnId);
     expect(parentId(sub!)).toBe(turnId);
 
-    const first = llms.find((s) => attr(s, "lmnr.span.output") === "Running ls.")!;
+    const first = llms.find((s) => outputText(s) === "Running ls.")!;
     expect(parentId(first)).toBe(turnId);
     expect(attr(first, "lmnr.span.type")).toBe("LLM");
     expect(JSON.parse(attr(first, "lmnr.span.input") as string)).toEqual([
-      { role: "system", content: "You are OpenCode." },
+      { role: "system", content: [{ type: "text", text: "You are OpenCode." }] },
       { role: "user", content: [{ type: "text", text: "list the files and summarize" }] },
     ]);
-    expect(JSON.parse(attr(first, "gen_ai.output.messages") as string)).toEqual([{
+    expect(JSON.parse(attr(first, "lmnr.span.output") as string)).toEqual([{
       role: "assistant",
-      parts: [
-        { type: "thinking", content: "Need to run ls" },
-        { type: "text", content: "Running ls." },
-        { type: "tool_call", id: "call_bash", name: "bash", arguments: { command: "ls" } },
+      content: [
+        { type: "reasoning", text: "Need to run ls" },
+        { type: "text", text: "Running ls." },
+        { type: "tool-call", id: "call_bash", name: "bash", input: { command: "ls" } },
       ],
     }]);
     expect(attr(first, "gen_ai.usage.input_tokens")).toBe(160);
@@ -199,13 +202,19 @@ describe("SessionTracer", () => {
     expect(attr(first, "gen_ai.usage.cost")).toBe(0.0123);
     expect(attr(first, "gen_ai.system")).toBe("anthropic");
     expect(attr(first, "gen_ai.request.model")).toBe("claude-sonnet-4-5");
+    expect(JSON.parse(attr(first, "gen_ai.tool.definitions") as string)).toEqual([
+      { type: "function", name: "bash", description: "", parameters: {} },
+      { type: "function", name: "subagent", description: "", parameters: {} },
+    ]);
 
     expect(attr(bash!, "lmnr.span.type")).toBe("TOOL");
     expect(JSON.parse(attr(bash!, "lmnr.span.input") as string)).toEqual({ command: "ls" });
-    expect(JSON.parse(attr(bash!, "lmnr.span.output") as string)).toBe("README.md\nsrc");
+    expect(JSON.parse(attr(bash!, "lmnr.span.output") as string)).toEqual([
+      { type: "text", text: "README.md\nsrc" },
+    ]);
 
     // The subagent's LLM span nests under the subagent tool call.
-    const child = llms.find((s) => attr(s, "lmnr.span.output") === "README describes the plugin.")!;
+    const child = llms.find((s) => outputText(s) === "README describes the plugin.")!;
     expect(parentId(child)).toBe(sub!.spanContext().spanId);
     expect(attr(child, SESSION_ID)).toBe("ses_root");
     expect(attr(child, "lmnr.spawning_subagent.tool_use_id")).toBe("call_sub");
@@ -245,6 +254,22 @@ describe("SessionTracer", () => {
     expect(parentId(turn!)).toBe(outer.spanContext().spanId);
   });
 
+  it("ends the LLM span when the response finishes streaming, not when its tools settle", () => {
+    const t = new SessionTracer();
+    submit(t, "ses_stream", "run it");
+    t.handle(ev("session.execution.started", { sessionID: "ses_stream" }));
+    const ids = { sessionID: "ses_stream", assistantMessageID: "msg_s" };
+    t.handle(ev("session.step.started", { ...ids, agent: "build", model, started: clock }));
+    const streamed = ev("session.step.streamed", ids);
+    t.handle(streamed);
+    t.handle(ev("session.tool.input.started", { ...ids, id: "call_s", name: "bash" }));
+    t.handle(ev("session.tool.called", { ...ids, id: "call_s", input: {}, executed: true }));
+    toolDone(t, "ses_stream", "call_s", "done");
+    t.handle(ev("session.step.ended", { ...ids, finish: "tool-calls", cost: 0, tokens }));
+    const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
+    expect(llm!.endTime[0] * 1e3 + llm!.endTime[1] / 1e6).toBe(streamed.created);
+  });
+
   it("closes open spans with an error when the execution fails", () => {
     const t = new SessionTracer();
     submit(t, "ses_fail", "do it");
@@ -257,6 +282,8 @@ describe("SessionTracer", () => {
     }));
     expect(spans()).toHaveLength(2);
     expect(spans().every((s) => s.ended && s.status.code === 2)).toBe(true);
+    // Laminar marks a span as failed only when it carries an exception event.
+    expect(spans().every((s) => s.events.some((e) => e.name === "exception"))).toBe(true);
     expect(byName("opencode turn")[0]!.status.message).toBe("rate limited");
   });
 
@@ -305,7 +332,7 @@ describe("SessionTracer", () => {
     expect(second!.events).toHaveLength(0);
   });
 
-  it("strips inline media from the captured request", () => {
+  it("keeps inline media in the captured request", () => {
     const t = new SessionTracer();
     const big = "x".repeat(100_000);
     t.onContext({
@@ -314,15 +341,22 @@ describe("SessionTracer", () => {
         role: "user",
         content: [
           { type: "text", text: "look" },
-          { type: "media", media: { mime: "image/png", data: big }, filename: "a.png" },
+          {
+            type: "media",
+            media: { mediaType: "image/png", source: { type: "base64", data: big } },
+            filename: "a.png",
+          },
         ],
       }],
     }, "primary");
     step(t, "ses_media", "msg_m", { text: "ok" });
     const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
     const input = attr(llm!, "lmnr.span.input") as string;
-    expect(input).not.toContain(big.slice(0, 1000));
-    expect(input).toContain("a.png");
+    expect(JSON.parse(input)[1].content[1]).toEqual({
+      type: "media",
+      media: { mediaType: "image/png", source: { type: "base64", data: big } },
+      filename: "a.png",
+    });
   });
   it("keeps next-turn state that arrives before the previous turn's end event", () => {
     const t = new SessionTracer();
@@ -343,7 +377,7 @@ describe("SessionTracer", () => {
     const [, second] = byName("opencode turn");
     expect(JSON.parse(attr(second!, "lmnr.span.input") as string)).toMatchObject({ text: "second" });
     const llm = byName("ai.llm anthropic:claude-sonnet-4-5").find(
-      (s) => attr(s, "lmnr.span.output") === "two",
+      (s) => outputText(s) === "two",
     )!;
     expect(JSON.parse(attr(llm, "lmnr.span.input") as string)).toContainEqual({
       role: "user",
