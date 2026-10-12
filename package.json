@@ -23,7 +23,7 @@
     "build": "tsdown",
     "lint": "eslint",
     "lint:fix": "eslint --fix",
-    "test": "vitest run"
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "repository": {
     "type": "git",
@@ -61,8 +61,8 @@
     "eslint-plugin-simple-import-sort": "^13.0.0",
     "eslint-plugin-unused-imports": "^4.4.1",
     "tsdown": "^0.22.0",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.59.3",
-    "vitest": "^5.0.3"
+    "typescript-eslint": "^8.59.3"
   }
 }

@@ -4,7 +4,8 @@ import {
   type ReadableSpan,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import assert from "node:assert/strict";
+import { afterEach, before, describe, it } from "node:test";
 
 import plugin from "../src/index";
 import { SessionTracer } from "../src/v2/tracer";
@@ -12,7 +13,7 @@ import type { OpenCodeEvent } from "../src/v2/types";
 
 const exporter = new InMemorySpanExporter();
 
-beforeAll(() => {
+before(() => {
   Laminar.initialize({
     projectApiKey: "test",
     // The real Laminar processor (it adds span paths), exporting to memory.
@@ -110,13 +111,15 @@ const attr = (span: ReadableSpan, key: string) => span.attributes[key];
 const outputText = (span: ReadableSpan) =>
   JSON.parse((attr(span, "lmnr.span.output") as string) ?? "[]")[0]?.content
     .find((part: { type: string }) => part.type === "text")?.text;
+const inputText = (span: ReadableSpan) =>
+  JSON.parse(attr(span, "lmnr.span.input") as string).text;
 const SESSION_ID = "lmnr.association.properties.session_id";
 
 describe("default export", () => {
   it("exposes both the V1 server() and the V2 id/setup()", () => {
-    expect(plugin.id).toBe("laminar");
-    expect(typeof plugin.setup).toBe("function");
-    expect(typeof plugin.server).toBe("function");
+    assert.equal(plugin.id, "laminar");
+    assert.equal(typeof plugin.setup, "function");
+    assert.equal(typeof plugin.server, "function");
   });
 });
 
@@ -159,36 +162,34 @@ describe("SessionTracer", () => {
 
     // One turn span; subagent executions do not get their own turn.
     const [turn] = byName("opencode turn");
-    expect(byName("opencode turn")).toHaveLength(1);
-    expect(turn).toBeDefined();
-    expect(parentId(turn!)).toBeUndefined();
-    expect(attr(turn!, SESSION_ID)).toBe("ses_root");
-    expect(JSON.parse(attr(turn!, "lmnr.span.input") as string)).toMatchObject({
-      text: "list the files and summarize",
-    });
-    expect(attr(turn!, "lmnr.span.output")).toBe("Two entries; README describes the plugin.");
+    assert.equal(byName("opencode turn").length, 1);
+    assert.ok(turn);
+    assert.equal(parentId(turn!), undefined);
+    assert.equal(attr(turn!, SESSION_ID), "ses_root");
+    assert.equal(inputText(turn!), "list the files and summarize");
+    assert.equal(attr(turn!, "lmnr.span.output"), "Two entries; README describes the plugin.");
 
     // Everything is in the turn's trace.
     const traceId = turn!.spanContext().traceId;
-    expect(new Set(spans().map((s) => s.spanContext().traceId))).toEqual(new Set([traceId]));
+    assert.deepEqual(new Set(spans().map((s) => s.spanContext().traceId)), new Set([traceId]));
 
     // Root LLM spans and tools hang off the turn.
     const llms = byName("ai.llm anthropic:claude-sonnet-4-5");
-    expect(llms).toHaveLength(4);
+    assert.equal(llms.length, 4);
     const turnId = turn!.spanContext().spanId;
     const [bash] = byName("bash");
     const [sub] = byName("subagent");
-    expect(parentId(bash!)).toBe(turnId);
-    expect(parentId(sub!)).toBe(turnId);
+    assert.equal(parentId(bash!), turnId);
+    assert.equal(parentId(sub!), turnId);
 
     const first = llms.find((s) => outputText(s) === "Running ls.")!;
-    expect(parentId(first)).toBe(turnId);
-    expect(attr(first, "lmnr.span.type")).toBe("LLM");
-    expect(JSON.parse(attr(first, "lmnr.span.input") as string)).toEqual([
+    assert.equal(parentId(first), turnId);
+    assert.equal(attr(first, "lmnr.span.type"), "LLM");
+    assert.deepEqual(JSON.parse(attr(first, "lmnr.span.input") as string), [
       { role: "system", content: [{ type: "text", text: "You are OpenCode." }] },
       { role: "user", content: [{ type: "text", text: "list the files and summarize" }] },
     ]);
-    expect(JSON.parse(attr(first, "lmnr.span.output") as string)).toEqual([{
+    assert.deepEqual(JSON.parse(attr(first, "lmnr.span.output") as string), [{
       role: "assistant",
       content: [
         { type: "reasoning", text: "Need to run ls" },
@@ -196,35 +197,35 @@ describe("SessionTracer", () => {
         { type: "tool-call", id: "call_bash", name: "bash", input: { command: "ls" } },
       ],
     }]);
-    expect(attr(first, "gen_ai.usage.input_tokens")).toBe(160);
-    expect(attr(first, "gen_ai.usage.output_tokens")).toBe(25);
-    expect(attr(first, "gen_ai.usage.cache_read_input_tokens")).toBe(50);
-    expect(attr(first, "gen_ai.usage.cost")).toBe(0.0123);
-    expect(attr(first, "gen_ai.system")).toBe("anthropic");
-    expect(attr(first, "gen_ai.request.model")).toBe("claude-sonnet-4-5");
-    expect(JSON.parse(attr(first, "gen_ai.tool.definitions") as string)).toEqual([
+    assert.equal(attr(first, "gen_ai.usage.input_tokens"), 160);
+    assert.equal(attr(first, "gen_ai.usage.output_tokens"), 25);
+    assert.equal(attr(first, "gen_ai.usage.cache_read_input_tokens"), 50);
+    assert.equal(attr(first, "gen_ai.usage.cost"), 0.0123);
+    assert.equal(attr(first, "gen_ai.system"), "anthropic");
+    assert.equal(attr(first, "gen_ai.request.model"), "claude-sonnet-4-5");
+    assert.deepEqual(JSON.parse(attr(first, "gen_ai.tool.definitions") as string), [
       { type: "function", name: "bash", description: "", parameters: {} },
       { type: "function", name: "subagent", description: "", parameters: {} },
     ]);
 
-    expect(attr(bash!, "lmnr.span.type")).toBe("TOOL");
-    expect(JSON.parse(attr(bash!, "lmnr.span.input") as string)).toEqual({ command: "ls" });
-    expect(JSON.parse(attr(bash!, "lmnr.span.output") as string)).toEqual([
+    assert.equal(attr(bash!, "lmnr.span.type"), "TOOL");
+    assert.deepEqual(JSON.parse(attr(bash!, "lmnr.span.input") as string), { command: "ls" });
+    assert.deepEqual(JSON.parse(attr(bash!, "lmnr.span.output") as string), [
       { type: "text", text: "README.md\nsrc" },
     ]);
 
     // The subagent's LLM span nests under the subagent tool call.
     const child = llms.find((s) => outputText(s) === "README describes the plugin.")!;
-    expect(parentId(child)).toBe(sub!.spanContext().spanId);
-    expect(attr(child, SESSION_ID)).toBe("ses_root");
-    expect(attr(child, "lmnr.spawning_subagent.tool_use_id")).toBe("call_sub");
+    assert.equal(parentId(child), sub!.spanContext().spanId);
+    assert.equal(attr(child, SESSION_ID), "ses_root");
+    assert.equal(attr(child, "lmnr.spawning_subagent.tool_use_id"), "call_sub");
 
     // Laminar span paths follow the tree, which is what the UI nests by.
-    expect(attr(child, "lmnr.span.path")).toEqual(["opencode turn", "subagent", child.name]);
-    expect(attr(bash!, "lmnr.span.path")).toEqual(["opencode turn", "bash"]);
+    assert.deepEqual(attr(child, "lmnr.span.path"), ["opencode turn", "subagent", child.name]);
+    assert.deepEqual(attr(bash!, "lmnr.span.path"), ["opencode turn", "bash"]);
 
-    expect(spans().every((s) => s.ended)).toBe(true);
-    expect(flushes).toBe(1);
+    assert.ok(spans().every((s) => s.ended));
+    assert.equal(flushes, 1);
   });
 
   it("starts a new trace for each turn of the same session", () => {
@@ -236,9 +237,9 @@ describe("SessionTracer", () => {
       t.handle(ev("session.execution.succeeded", { sessionID: "ses_multi" }));
     }
     const turns = byName("opencode turn");
-    expect(turns).toHaveLength(2);
-    expect(turns[0]!.spanContext().traceId).not.toBe(turns[1]!.spanContext().traceId);
-    expect(turns.map((s) => attr(s, SESSION_ID))).toEqual(["ses_multi", "ses_multi"]);
+    assert.equal(turns.length, 2);
+    assert.notEqual(turns[0]!.spanContext().traceId, turns[1]!.spanContext().traceId);
+    assert.deepEqual(turns.map((s) => attr(s, SESSION_ID)), ["ses_multi", "ses_multi"]);
   });
 
   it("parents the turn under an external span context from prompt metadata", () => {
@@ -250,8 +251,8 @@ describe("SessionTracer", () => {
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_ext" }));
     outer.end();
     const [turn] = byName("opencode turn");
-    expect(turn!.spanContext().traceId).toBe(outer.spanContext().traceId);
-    expect(parentId(turn!)).toBe(outer.spanContext().spanId);
+    assert.equal(turn!.spanContext().traceId, outer.spanContext().traceId);
+    assert.equal(parentId(turn!), outer.spanContext().spanId);
   });
 
   it("ends the LLM span when the response finishes streaming, not when its tools settle", () => {
@@ -267,7 +268,7 @@ describe("SessionTracer", () => {
     toolDone(t, "ses_stream", "call_s", "done");
     t.handle(ev("session.step.ended", { ...ids, finish: "tool-calls", cost: 0, tokens }));
     const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
-    expect(llm!.endTime[0] * 1e3 + llm!.endTime[1] / 1e6).toBe(streamed.created);
+    assert.equal(llm!.endTime[0] * 1e3 + llm!.endTime[1] / 1e6, streamed.created);
   });
 
   it("closes open spans with an error when the execution fails", () => {
@@ -280,11 +281,11 @@ describe("SessionTracer", () => {
     t.handle(ev("session.execution.failed", {
       sessionID: "ses_fail", error: { type: "provider", message: "rate limited" },
     }));
-    expect(spans()).toHaveLength(2);
-    expect(spans().every((s) => s.ended && s.status.code === 2)).toBe(true);
+    assert.equal(spans().length, 2);
+    assert.ok(spans().every((s) => s.ended && s.status.code === 2));
     // Laminar marks a span as failed only when it carries an exception event.
-    expect(spans().every((s) => s.events.some((e) => e.name === "exception"))).toBe(true);
-    expect(byName("opencode turn")[0]!.status.message).toBe("rate limited");
+    assert.ok(spans().every((s) => s.events.some((e) => e.name === "exception")));
+    assert.equal(byName("opencode turn")[0]!.status.message, "rate limited");
   });
 
   it("traces spans that arrive without a prompt (plugin loaded mid-execution)", () => {
@@ -293,8 +294,8 @@ describe("SessionTracer", () => {
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_late" }));
     const [turn] = byName("opencode turn");
     const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
-    expect(parentId(llm!)).toBe(turn!.spanContext().spanId);
-    expect(turn!.ended).toBe(true);
+    assert.equal(parentId(llm!), turn!.spanContext().spanId);
+    assert.ok(turn!.ended);
   });
   it("ignores prompts that were never admitted or were cancelled", () => {
     const t = new SessionTracer();
@@ -305,9 +306,7 @@ describe("SessionTracer", () => {
     t.handle(ev("session.execution.started", { sessionID: "ses_adm" }));
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_adm" }));
     const [turn] = byName("opencode turn");
-    expect(JSON.parse(attr(turn!, "lmnr.span.input") as string)).toMatchObject({
-      text: "the real prompt",
-    });
+    assert.equal(inputText(turn!), "the real prompt");
   });
 
   it("attaches steering prompts to the running turn and queued ones to the next", () => {
@@ -323,13 +322,13 @@ describe("SessionTracer", () => {
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_q" }));
 
     const [first, second] = byName("opencode turn");
-    expect(JSON.parse(attr(first!, "lmnr.span.input") as string)).toMatchObject({ text: "first" });
-    expect(first!.events.map((e) => JSON.parse(e.attributes!["lmnr.span.input"] as string).text))
-      .toEqual(["steer into first"]);
-    expect(JSON.parse(attr(second!, "lmnr.span.input") as string)).toMatchObject({
-      text: "queued for second",
-    });
-    expect(second!.events).toHaveLength(0);
+    assert.equal(inputText(first!), "first");
+    assert.deepEqual(
+      first!.events.map((e) => JSON.parse(e.attributes!["lmnr.span.input"] as string).text),
+      ["steer into first"],
+    );
+    assert.equal(inputText(second!), "queued for second");
+    assert.equal(second!.events.length, 0);
   });
 
   it("keeps inline media in the captured request", () => {
@@ -352,7 +351,7 @@ describe("SessionTracer", () => {
     step(t, "ses_media", "msg_m", { text: "ok" });
     const [llm] = byName("ai.llm anthropic:claude-sonnet-4-5");
     const input = attr(llm!, "lmnr.span.input") as string;
-    expect(JSON.parse(input)[1].content[1]).toEqual({
+    assert.deepEqual(JSON.parse(input)[1].content[1], {
       type: "media",
       media: { mediaType: "image/png", source: { type: "base64", data: big } },
       filename: "a.png",
@@ -375,11 +374,11 @@ describe("SessionTracer", () => {
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_race" }));
 
     const [, second] = byName("opencode turn");
-    expect(JSON.parse(attr(second!, "lmnr.span.input") as string)).toMatchObject({ text: "second" });
+    assert.equal(inputText(second!), "second");
     const llm = byName("ai.llm anthropic:claude-sonnet-4-5").find(
       (s) => outputText(s) === "two",
     )!;
-    expect(JSON.parse(attr(llm, "lmnr.span.input") as string)).toContainEqual({
+    assert.deepEqual(JSON.parse(attr(llm, "lmnr.span.input") as string).at(-1), {
       role: "user",
       content: [{ type: "text", text: "second" }],
     });
@@ -396,6 +395,6 @@ describe("SessionTracer", () => {
     }));
     step(t, "ses_loop", "msg_l2", { text: "still tracing" });
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_loop" }));
-    expect(byName("opencode turn")).toHaveLength(1);
+    assert.equal(byName("opencode turn").length, 1);
   });
 });
