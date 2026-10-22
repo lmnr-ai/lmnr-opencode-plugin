@@ -71,7 +71,6 @@ jobs:
       - name: Publish package
         run: pnpm publish --provenance --access public --no-git-checks
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
       - name: Verify npm provenance
         env:
