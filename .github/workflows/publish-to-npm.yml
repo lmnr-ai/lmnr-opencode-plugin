@@ -70,11 +70,10 @@ jobs:
       - run: pnpm build
       - name: Publish package
         run: pnpm publish --provenance --access public --no-git-checks
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
       - name: Verify npm provenance
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           # Downloads the published tarball and checks that npm's SLSA
           # provenance for it was signed by this workflow, in this repository,
