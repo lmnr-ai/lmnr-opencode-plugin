@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 
-import { readProjectEnv, resolveLaminarConfig } from "../src/v2/config";
+import { endpointLabel, readProjectEnv, resolveLaminarConfig } from "../src/v2/config";
 import type { PluginContext } from "../src/v2/types";
 
 const roots: string[] = [];
@@ -101,6 +101,31 @@ describe("resolveLaminarConfig", () => {
 
     assert.equal(resolved.baseUrl, "https://api.lmnr.ai");
     assert.equal(resolved.port, 8443);
+  });
+
+  it("takes the gRPC port from the base URL", () => {
+    const root = project({});
+
+    const resolved = resolveLaminarConfig(context(root), {
+      LMNR_PROJECT_API_KEY: "key",
+      LMNR_BASE_URL: "http://192.168.178.204:8001",
+    });
+
+    assert.equal(resolved.port, 8001);
+    assert.equal(endpointLabel(resolved), "http://192.168.178.204:8001");
+  });
+
+  it("lets LMNR_GRPC_PORT override the base URL port", () => {
+    const root = project({});
+
+    const resolved = resolveLaminarConfig(context(root), {
+      LMNR_PROJECT_API_KEY: "key",
+      LMNR_BASE_URL: "http://192.168.178.204:8001",
+      LMNR_GRPC_PORT: "9100",
+    });
+
+    assert.equal(resolved.port, 9100);
+    assert.equal(endpointLabel(resolved), "http://192.168.178.204:9100");
   });
 
   it("reports a missing project API key", () => {

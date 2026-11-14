@@ -1,6 +1,7 @@
 import { Laminar, LaminarAttributes } from "@lmnr-ai/lmnr";
 import { type Context, ROOT_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 
+import { debug } from "../debug";
 import { otelSpanIdToUUID } from "../utils";
 import { requestMessages, responseMessages, type ToolCall } from "./messages";
 import { LOCATION_METADATA_KEY } from "./router";
@@ -211,6 +212,7 @@ export class SessionTracer {
         ? { parentSpanContext: state.externalContext }
         : { context: ROOT_CONTEXT }),
     });
+    debug(`turn start ${this.locationKey} ${state.id}`);
   }
 
   private endTurn(state: SessionState, endTime: number, error?: string) {
@@ -225,6 +227,7 @@ export class SessionTracer {
     if (error) fail(state.turn, error);
     state.turn.end(endTime);
     state.turn = undefined;
+    debug(`turn end ${this.locationKey} ${state.id}`);
     this.onTurnEnd();
   }
 

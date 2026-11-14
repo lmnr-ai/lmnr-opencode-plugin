@@ -61,6 +61,9 @@ To parent a turn under a span from your own code, pass a serialized Laminar span
 | `LMNR_PROJECT_API_KEY` | (required) | Laminar project API key |
 | `LMNR_BASE_URL` | `https://api.lmnr.ai` | Point at a self-hosted Laminar instance |
 | `LMNR_GRPC_PORT` | `8443` for Laminar Cloud, SDK default otherwise | gRPC port for the exporter |
+| `LMNR_DEBUG_LOG` | unset | Append plugin diagnostics to this file |
+
+A self-hosted instance that serves gRPC on a non-default port needs that port either in `LMNR_GRPC_PORT` or in `LMNR_BASE_URL` (`http://laminar.example.com:8001`); without it the exporter uses `8443` and the spans never arrive. The OpenCode server discards a plugin's stdout, so `LMNR_DEBUG_LOG` is the way to see the resolved endpoint, pipeline reuse and turn start/end in the background service.
 
 On V2, the configuration is resolved per project. The plugin options take precedence over the project's `.env` files, which take precedence over the environment of the OpenCode service:
 
@@ -75,7 +78,7 @@ On V2, the configuration is resolved per project. The plugin options take preced
 }
 ```
 
-Put that `plugins` entry in the project's `opencode.json(c)` (or `.opencode/opencode.json(c)`) to configure only that project, and in the global config to set a default. The same applies to the variables above: a project `.env` overrides the service environment, and two projects in the same OpenCode server can use different keys, endpoints and ports. Values are read at plugin load, so after editing them use `/reload`; restarting the service is not needed.
+Put that `plugins` entry in the project's `opencode.json(c)` (or `.opencode/opencode.json(c)`) to configure only that project, and in the global config to set a default. The same applies to the variables above: a project `.env` overrides the service environment, and two projects in the same OpenCode server can use different keys, endpoints and ports. Values are read at plugin load, so after editing them use `/reload`; restarting the service is not needed. After updating the plugin itself, restart the service once: the previous version may have initialized Laminar in the running process.
 
 ## Learn more
 

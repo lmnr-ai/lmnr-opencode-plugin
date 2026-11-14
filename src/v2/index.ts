@@ -1,8 +1,11 @@
 import { Laminar, LaminarSpanProcessor } from "@lmnr-ai/lmnr";
+import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
 
-import { resolveLaminarConfig } from "./config";
+import { debug } from "../debug";
+import { endpointLabel, resolveLaminarConfig } from "./config";
 import { locationKey, ownsLocation } from "./location";
-import { locationRouter, type LocationSpanRouter } from "./router";
+import { type TracingRegistry,tracingRegistry } from "./registry";
+import type { LocationSpanRouter } from "./router";
 import { SessionTracer } from "./tracer";
 import type { PluginContext } from "./types";
 
@@ -14,36 +17,90 @@ const log = (level: "info" | "warn" | "error", message: string) => {
 // Laminar endpoint can't hold up OpenCode's shutdown.
 const SHUTDOWN_FLUSH_TIMEOUT_MS = 5_000;
 
+// A pipeline that is replaced keeps exporting the spans that started under it.
+// The grace period is longer than a model turn is likely to stay open.
+const PROCESSOR_RETIRE_MS = 30_000;
+
 // `Laminar.initialize` validates the key even when it is given a span
 // processor, so the router needs a placeholder. It never reaches an endpoint:
 // every span is exported by the Location's own processor.
 const ROUTER_API_KEY = "opencode-location-router";
 
-let routerInstalled = false;
-
 /**
- * Install the process-wide router once. The tracer provider is global by
- * design; the exporters are not. The base URL only satisfies the SDK's global
- * bookkeeping: no exporter is created here, because every span is delegated to
- * a Location's own processor.
+ * Install the process-wide router once.
+ *
+ * OpenCode re-evaluates the plugin in the same server process, so this must be
+ * idempotent: only the first evaluation initializes Laminar, and the rest reuse
+ * the router kept on the global object. The tracer provider is global by
+ * design; the exporters are not.
  */
-const ensureRouter = (baseUrl: string): LocationSpanRouter | undefined => {
-  if (routerInstalled) return locationRouter;
-  if (Laminar.initialized()) {
+const installRouter = (
+  registry: TracingRegistry,
+  baseUrl: string,
+): LocationSpanRouter | undefined => {
+  if (!Laminar.initialized()) {
+    Laminar.initialize({
+      projectApiKey: ROUTER_API_KEY,
+      baseUrl,
+      spanProcessor: registry.router,
+      instrumentModules: {},
+    });
+    registry.installed = true;
+    debug(`router installed (${baseUrl})`);
+    return registry.router;
+  }
+  if (!registry.installed) {
     log(
       "error",
-      "Laminar is already initialized by another plugin; per-project tracing is unavailable",
+      "Laminar was initialized outside this plugin; per-project tracing is unavailable",
     );
+    debug("router unavailable: foreign Laminar initializer");
     return undefined;
   }
-  Laminar.initialize({
-    projectApiKey: ROUTER_API_KEY,
-    baseUrl,
-    spanProcessor: locationRouter,
-    instrumentModules: {},
-  });
-  routerInstalled = true;
-  return locationRouter;
+  debug("router reused");
+  return registry.router;
+};
+
+const retireProcessor = (processor: SpanProcessor): void => {
+  const timer = setTimeout(() => {
+    void (async () => {
+      try {
+        await processor.forceFlush?.();
+        await processor.shutdown();
+      } catch (error) {
+        log("warn", `retired pipeline shutdown failed: ${String(error)}`);
+      }
+    })();
+  }, PROCESSOR_RETIRE_MS);
+  (timer as unknown as { unref?: () => void }).unref?.();
+};
+
+/**
+ * One pipeline per Location, reused across plugin reloads.
+ *
+ * Reloading the plugin must not create a new exporter: the one in flight still
+ * holds the open spans of the current turn. It is replaced only when the
+ * resolved configuration actually changes.
+ */
+const acquireProcessor = (
+  registry: TracingRegistry,
+  key: string,
+  signature: string,
+  create: () => SpanProcessor,
+): SpanProcessor => {
+  const existing = registry.entries.get(key);
+  if (existing && existing.signature === signature) {
+    debug(`pipeline reused ${key}`);
+    return existing.processor;
+  }
+
+  const processor = create();
+  registry.router.register(key, processor);
+  registry.entries.set(key, { signature, processor });
+  // The signature contains the project API key: never put it in a log.
+  debug(`pipeline created ${key}`);
+  if (existing) retireProcessor(existing.processor);
+  return processor;
 };
 
 // V2 builds spans from the public event stream and session hooks. The V1
@@ -51,23 +108,24 @@ const ensureRouter = (baseUrl: string): LocationSpanRouter | undefined => {
 // spans) does not exist in V2.
 export const setupV2 = async (ctx: PluginContext) => {
   const config = resolveLaminarConfig(ctx);
+  debug(`setup ${ctx.location.directory} endpoint=${endpointLabel(config)}`);
   if (!config.projectApiKey) {
     log("info", "LMNR_PROJECT_API_KEY not set, skipping Laminar tracing");
+    debug(`setup skipped ${ctx.location.directory}: no project API key`);
     return;
   }
 
-  const router = ensureRouter(config.baseUrl);
+  const registry = tracingRegistry();
+  const router = installRouter(registry, config.baseUrl);
   if (!router) return;
 
-  // One pipeline per Location: a config or `.env` change on reload builds a new
-  // processor instead of being ignored by a process-wide singleton.
   const key = locationKey(ctx.location);
-  const processor = new LaminarSpanProcessor({
-    apiKey: config.projectApiKey,
-    baseUrl: config.baseUrl,
-    ...(config.port !== undefined ? { port: config.port } : {}),
-  });
-  const unregister = router.register(key, processor);
+  const processor = acquireProcessor(registry, key, JSON.stringify(config), () =>
+    new LaminarSpanProcessor({
+      apiKey: config.projectApiKey,
+      baseUrl: config.baseUrl,
+      ...(config.port !== undefined ? { port: config.port } : {}),
+    }));
 
   // Turn-end flushes run in the background, but short-lived runs such as
   // `opencode run` unload the plugin right after the last turn, so cleanup
@@ -103,19 +161,19 @@ export const setupV2 = async (ctx: PluginContext) => {
     }
   })();
 
-  log("info", `tracing initialized → ${config.baseUrl} (${ctx.location.directory})`);
+  log("info", `tracing initialized → ${endpointLabel(config)} (${ctx.location.directory})`);
+  debug(`tracing ready ${key} ${endpointLabel(config)}`);
 
   return async () => {
     controller.abort();
     tracer.shutdown();
-    unregister();
     flush();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise((done) => (timer = setTimeout(done, SHUTDOWN_FLUSH_TIMEOUT_MS)));
     await Promise.race([Promise.allSettled(inFlight), timeout]);
     clearTimeout(timer);
-    await processor
-      .shutdown()
-      .catch((error: unknown) => log("warn", `shutdown failed: ${String(error)}`));
+    // The pipeline stays registered: this unload may be a config reload in the
+    // same process, and the next setup for this Location reuses it.
+    debug(`cleanup ${key}`);
   };
 };

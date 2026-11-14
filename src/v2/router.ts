@@ -1,6 +1,8 @@
 import type { Context, Span } from "@opentelemetry/api";
 import type { ReadableSpan, SpanProcessor } from "@opentelemetry/sdk-trace-base";
 
+import { debug } from "../debug";
+
 export const LOCATION_METADATA_KEY = "opencodeLocation";
 
 /**
@@ -43,7 +45,10 @@ export class LocationSpanRouter implements SpanProcessor {
     const key = attributes?.[LOCATION_ATTRIBUTE];
     if (typeof key !== "string") return;
     const processor = this.processors.get(key);
-    if (!processor) return;
+    if (!processor) {
+      debug(`span dropped: no pipeline for ${key}`);
+      return;
+    }
     this.spanProcessors.set(span.spanContext().spanId, processor);
     processor.onStart(span, parentContext);
   }
