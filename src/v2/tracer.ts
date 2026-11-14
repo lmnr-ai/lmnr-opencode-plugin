@@ -3,6 +3,7 @@ import { type Context, ROOT_CONTEXT, type Span, SpanStatusCode, trace } from "@o
 
 import { otelSpanIdToUUID } from "../utils";
 import { requestMessages, responseMessages, type ToolCall } from "./messages";
+import { LOCATION_METADATA_KEY } from "./router";
 import type { OpenCodeEvent, SessionContextHook, SessionPromptHook } from "./types";
 
 // Tools that start a child session. V2 calls it `subagent`; `task` is the V1 name.
@@ -96,7 +97,10 @@ const usageAttributes = (tokens: TokenUsage | undefined, cost: number | undefine
 export class SessionTracer {
   private sessions = new Map<string, SessionState>();
 
-  constructor(private readonly onTurnEnd: () => void = () => {}) {}
+  constructor(
+    private readonly onTurnEnd: () => void = () => {},
+    private readonly locationKey: string = "default",
+  ) {}
 
   private session(id: string): SessionState {
     let state = this.sessions.get(id);
@@ -178,6 +182,7 @@ export class SessionTracer {
       ...(options.startTime !== undefined ? { startTime: options.startTime } : {}),
       sessionId: this.rootSessionId(state),
       context: this.parentContext(state),
+      metadata: { [LOCATION_METADATA_KEY]: this.locationKey },
     });
     span.setAttributes({ ...this.spawnAttributes(state), ...options.attributes });
     return span;
@@ -201,6 +206,7 @@ export class SessionTracer {
       input,
       sessionId: state.id,
       ...(startTime !== undefined ? { startTime } : {}),
+      metadata: { [LOCATION_METADATA_KEY]: this.locationKey },
       ...(state.externalContext
         ? { parentSpanContext: state.externalContext }
         : { context: ROOT_CONTEXT }),
