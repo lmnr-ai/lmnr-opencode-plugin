@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { afterEach, before, describe, it } from "node:test";
 
 import plugin from "../src/index";
+import { locationRouter } from "../src/v2/router";
 import { SessionTracer } from "../src/v2/tracer";
 import type { OpenCodeEvent } from "../src/v2/types";
 
@@ -16,12 +17,18 @@ const exporter = new InMemorySpanExporter();
 before(() => {
   Laminar.initialize({
     projectApiKey: "test",
-    // The real Laminar processor (it adds span paths), exporting to memory.
-    spanProcessor: new LaminarSpanProcessor({
-      spanProcessor: new SimpleSpanProcessor(exporter),
-    }),
+    // The router sees the same Laminar processor the server installs; below it,
+    // each Location owns its exporter. Here the default key exports to memory.
+    spanProcessor: locationRouter,
     instrumentModules: {},
   });
+  locationRouter.register(
+    "default",
+    // The real Laminar processor (it adds span paths), exporting to memory.
+    new LaminarSpanProcessor({
+      spanProcessor: new SimpleSpanProcessor(exporter),
+    }),
+  );
 });
 
 afterEach(() => exporter.reset());
