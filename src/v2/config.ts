@@ -70,7 +70,7 @@ export const resolveLaminarConfig = (
     nonEmpty(options?.projectApiKey) ?? nonEmpty(env.LMNR_PROJECT_API_KEY);
   const baseUrl =
     nonEmpty(options?.baseUrl) ?? nonEmpty(env.LMNR_BASE_URL) ?? DEFAULT_BASE_URL;
-  const rawPort = nonEmpty(env.LMNR_GRPC_PORT);
+  const rawPort = nonEmpty(env.LMNR_GRPC_PORT) ?? nonEmpty(baseUrl.match(/:(\d{1,5})$/)?.[1]);
   const port = rawPort !== undefined ? Number(rawPort) : undefined;
   const grpcPort =
     port !== undefined && Number.isFinite(port)
@@ -85,3 +85,7 @@ export const resolveLaminarConfig = (
     ...(grpcPort !== undefined ? { port: grpcPort } : {}),
   };
 };
+
+/** The endpoint an exporter actually talks to, port included. */
+export const endpointLabel = ({ baseUrl, port }: LaminarConfig): string =>
+  port === undefined ? baseUrl : `${baseUrl.replace(/:\d{1,5}$/, "")}:${port}`;
