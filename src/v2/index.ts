@@ -3,8 +3,14 @@ import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
 
 import { debug } from "../debug";
 import { endpointLabel, resolveLaminarConfig } from "./config";
-import { locationKey, ownsLocation } from "./location";
-import { type TracingRegistry,tracingRegistry } from "./registry";
+import { locationKey } from "./location";
+import {
+  ownsEvent,
+  registerInstance,
+  type TracingRegistry,
+  tracingRegistry,
+  unregisterInstance,
+} from "./registry";
 import type { LocationSpanRouter } from "./router";
 import { SessionTracer } from "./tracer";
 import type { PluginContext } from "./types";
@@ -144,12 +150,18 @@ export const setupV2 = async (ctx: PluginContext) => {
   await ctx.session.hook("context", (event) => tracer.onContext(event, "primary"));
   await ctx.session.hook("compaction", (event) => tracer.onContext(event, "compaction"));
 
+  // Several instances of one project can be live at once: OpenCode loads the
+  // plugin per location, and locations nest. They share the pipeline, and the
+  // registry picks which of them traces each event. Registered last, so a
+  // failed setup leaves no instance behind to swallow the events.
+  const instance = registerInstance(registry, ctx.location);
   const controller = new AbortController();
   void (async () => {
     try {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        // The shared server may deliver events from other projects.
-        if (!ownsLocation(event.location, ctx.location)) continue;
+        // The shared server may deliver events from other projects, and every
+        // nested instance of this one: only the closest instance traces them.
+        if (!ownsEvent(registry, instance, event.location)) continue;
         try {
           tracer.handle(event);
         } catch (error) {
@@ -166,6 +178,7 @@ export const setupV2 = async (ctx: PluginContext) => {
 
   return async () => {
     controller.abort();
+    unregisterInstance(registry, instance);
     tracer.shutdown();
     flush();
     let timer: ReturnType<typeof setTimeout> | undefined;

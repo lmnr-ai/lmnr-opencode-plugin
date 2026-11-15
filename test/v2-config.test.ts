@@ -115,6 +115,39 @@ describe("resolveLaminarConfig", () => {
     assert.equal(endpointLabel(resolved), "http://192.168.178.204:8001");
   });
 
+  it("reads the gRPC port through a trailing slash or a path", () => {
+    const root = project({});
+
+    for (const baseUrl of [
+      "http://192.168.178.204:8001/",
+      "http://192.168.178.204:8001/laminar",
+      "http://192.168.178.204:8001/laminar/?trace=1",
+    ]) {
+      const resolved = resolveLaminarConfig(context(root), {
+        LMNR_PROJECT_API_KEY: "key",
+        LMNR_BASE_URL: baseUrl,
+      });
+
+      // The exporter appends the port to the base URL itself, so anything after
+      // the authority must be gone by the time it sees it.
+      assert.equal(resolved.baseUrl, "http://192.168.178.204");
+      assert.equal(resolved.port, 8001);
+      assert.equal(endpointLabel(resolved), "http://192.168.178.204:8001");
+    }
+  });
+
+  it("still reaches Laminar Cloud through a trailing slash", () => {
+    const root = project({});
+
+    const resolved = resolveLaminarConfig(context(root), {
+      LMNR_PROJECT_API_KEY: "key",
+      LMNR_BASE_URL: "https://api.lmnr.ai/",
+    });
+
+    assert.equal(resolved.baseUrl, "https://api.lmnr.ai");
+    assert.equal(resolved.port, 8443);
+  });
+
   it("lets LMNR_GRPC_PORT override the base URL port", () => {
     const root = project({});
 

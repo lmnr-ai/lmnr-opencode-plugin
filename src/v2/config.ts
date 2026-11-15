@@ -3,7 +3,7 @@ import * as path from "node:path";
 
 import { parse } from "dotenv";
 
-import type { LocationInfo } from "./location";
+import { projectRoot } from "./location";
 import type { PluginContext } from "./types";
 
 export interface LaminarConfig {
@@ -17,13 +17,6 @@ const DEFAULT_GRPC_PORT = 8443;
 
 const nonEmpty = (value: unknown): string | undefined =>
   typeof value === "string" && value.length > 0 ? value : undefined;
-
-/**
- * The project root, not the session directory: a session may be opened in a
- * subdirectory while its `.env` lives at the root of the repository.
- */
-export const projectRoot = (location: LocationInfo): string =>
-  location.project?.directory ?? location.project?.canonical ?? location.directory;
 
 const envFiles = (nodeEnv: string): string[] => [
   ".env",
@@ -54,6 +47,32 @@ export const readProjectEnv = (
 };
 
 /**
+ * Scheme, optional credentials and host of a base URL: everything up to the
+ * port and whatever follows it.
+ */
+const ENDPOINT =
+  /^((?:[a-z][a-z0-9+.-]*):\/\/)?((?:[^@/?#]*@)?)(\[[^\]]*\]|[^:/?#]+)(?::(\d{1,5}))?/i;
+
+/**
+ * Split a base URL into the endpoint Laminar needs and its gRPC port.
+ *
+ * The exporter builds its target as `${baseUrl}:${port}`, appending the port
+ * itself, so a trailing slash or a path (a reverse proxy prefix, say) must not
+ * survive here: it would either swallow the port or end up glued to it. The port
+ * is read from the authority, so `http://host:8001/` keeps its 8001.
+ */
+const splitBaseUrl = (baseUrl: string): { endpoint: string; port?: number } => {
+  const trimmed = baseUrl.trim();
+  const match = ENDPOINT.exec(trimmed);
+  if (!match) return { endpoint: trimmed };
+  const [, scheme = "", credentials = "", host = "", port] = match;
+  return {
+    endpoint: `${scheme}${credentials}${host}`,
+    ...(port !== undefined ? { port: Number(port) } : {}),
+  };
+};
+
+/**
  * Resolve the tracing configuration of one Location.
  *
  * Precedence: plugin options > project `.env` > the service environment.
@@ -68,9 +87,10 @@ export const resolveLaminarConfig = (
 
   const projectApiKey =
     nonEmpty(options?.projectApiKey) ?? nonEmpty(env.LMNR_PROJECT_API_KEY);
-  const baseUrl =
-    nonEmpty(options?.baseUrl) ?? nonEmpty(env.LMNR_BASE_URL) ?? DEFAULT_BASE_URL;
-  const rawPort = nonEmpty(env.LMNR_GRPC_PORT) ?? nonEmpty(baseUrl.match(/:(\d{1,5})$/)?.[1]);
+  const { endpoint: baseUrl, port: urlPort } = splitBaseUrl(
+    nonEmpty(options?.baseUrl) ?? nonEmpty(env.LMNR_BASE_URL) ?? DEFAULT_BASE_URL,
+  );
+  const rawPort = nonEmpty(env.LMNR_GRPC_PORT) ?? urlPort;
   const port = rawPort !== undefined ? Number(rawPort) : undefined;
   const grpcPort =
     port !== undefined && Number.isFinite(port)
@@ -88,4 +108,4 @@ export const resolveLaminarConfig = (
 
 /** The endpoint an exporter actually talks to, port included. */
 export const endpointLabel = ({ baseUrl, port }: LaminarConfig): string =>
-  port === undefined ? baseUrl : `${baseUrl.replace(/:\d{1,5}$/, "")}:${port}`;
+  port === undefined ? baseUrl : `${baseUrl}:${port}`;
