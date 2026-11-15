@@ -6,11 +6,11 @@ import { locationKey } from "../src/v2/location";
 import { resetRegistry, tracingRegistry } from "../src/v2/registry";
 import type { PluginContext } from "../src/v2/types";
 
-const ctxFor = (dir: string, options: Record<string, unknown>) =>
+const ctxFor = (dir: string, options: Record<string, unknown>, root = dir) =>
   ({
     location: {
       directory: dir,
-      project: { id: dir, directory: dir, canonical: dir },
+      project: { id: root, directory: root, canonical: root },
     },
     options,
     session: { hook: async () => {} },
@@ -73,5 +73,23 @@ describe("setupV2 reloads", () => {
     assert.ok(first);
     assert.ok(second);
     assert.notEqual(second, first);
+  });
+});
+
+describe("setupV2 nested locations", () => {
+  it("gives the whole project one pipeline", async () => {
+    const root = "/tmp/lmnr-setup-nested";
+    const sub = `${root}/packages/app`;
+
+    await (await setupV2(ctxFor(root, base, root)))?.();
+    const key = locationKey(ctxFor(root, base, root).location);
+    const processor = tracingRegistry().entries.get(key)?.processor;
+    const pipelines = tracingRegistry().entries.size;
+
+    await (await setupV2(ctxFor(sub, base, root)))?.();
+
+    assert.equal(locationKey(ctxFor(sub, base, root).location), key);
+    assert.equal(tracingRegistry().entries.get(key)?.processor, processor);
+    assert.equal(tracingRegistry().entries.size, pipelines);
   });
 });

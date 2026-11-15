@@ -48,7 +48,7 @@ If `LMNR_PROJECT_API_KEY` is not set, the plugin does nothing.
 
 **OpenCode V2.** The plugin subscribes to OpenCode's event stream and builds the spans itself: one span per model step (with the request messages, the response, token usage and cost) and one per tool call. It reads each step's messages from the `context` session hook and records them in OpenCode's own message format. V2 removed the `experimental.openTelemetry` flag, so the plugin doesn't use it.
 
-Each OpenCode project gets its own exporter. The server keeps one tracer provider for the process, and the plugin routes every span to the pipeline of the project it belongs to, so two projects can report to different Laminar projects or self-hosted instances — and editing a project's options or `.env` takes effect on reload, without restarting OpenCode.
+Each OpenCode project gets its own exporter. The server keeps one tracer provider for the process, and the plugin routes every span to the pipeline of the project it belongs to, so two projects can report to different Laminar projects or self-hosted instances — and editing a project's options or `.env` takes effect on reload, without restarting OpenCode. Every location of one project (OpenCode loads the plugin per directory, so the root and any directory inside it) shares that pipeline, and only the instance closest to a session traces it, so a conversation is never exported twice.
 
 **OpenCode V1.** The plugin turns on OpenCode's experimental OpenTelemetry flag and adds a Laminar span processor. The processor saves each conversation turn as its own trace, groups traces by session ID, and adds the attributes that power Laminar-specific features.
 
@@ -63,7 +63,7 @@ To parent a turn under a span from your own code, pass a serialized Laminar span
 | `LMNR_GRPC_PORT` | `8443` for Laminar Cloud, SDK default otherwise | gRPC port for the exporter |
 | `LMNR_DEBUG_LOG` | unset | Append plugin diagnostics to this file |
 
-A self-hosted instance that serves gRPC on a non-default port needs that port either in `LMNR_GRPC_PORT` or in `LMNR_BASE_URL` (`http://laminar.example.com:8001`); without it the exporter uses `8443` and the spans never arrive. The OpenCode server discards a plugin's stdout, so `LMNR_DEBUG_LOG` is the way to see the resolved endpoint, pipeline reuse and turn start/end in the background service.
+A self-hosted instance that serves gRPC on a non-default port needs that port either in `LMNR_GRPC_PORT` or in `LMNR_BASE_URL` (`http://laminar.example.com:8001`); without it the exporter uses `8443` and the spans never arrive. Only the scheme and host of `LMNR_BASE_URL` are used, so a trailing slash or a path is ignored. The OpenCode server discards a plugin's stdout, so `LMNR_DEBUG_LOG` is the way to see the resolved endpoint, pipeline reuse and turn start/end in the background service.
 
 On V2, the configuration is resolved per project. The plugin options take precedence over the project's `.env` files, which take precedence over the environment of the OpenCode service:
 
