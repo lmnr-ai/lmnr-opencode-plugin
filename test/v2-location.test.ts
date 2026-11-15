@@ -38,8 +38,13 @@ describe("coverage", () => {
   const rank = (self: LocationInfo, directory: string): number =>
     coverage({ directory }, self) as number;
 
-  it("accepts payloads without a location", () => {
-    assert.equal(coverage(undefined, info("/repo")), 0);
+  it("ranks a payload without a location by the instance's own depth", () => {
+    assert.equal(coverage(undefined, info("/repo")), 0.5);
+    assert.equal(coverage(undefined, nested("/repo/src", "/repo")), 1 / 3);
+    assert.ok(
+      (coverage(undefined, info("/repo")) as number) >
+        (coverage(undefined, nested("/repo/src", "/repo")) as number),
+    );
   });
 
   it("ranks an exact location above an enclosing one", () => {

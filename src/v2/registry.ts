@@ -9,6 +9,8 @@ export interface ProcessorEntry {
 }
 
 export interface InstanceRecord {
+  /** The Location key: instances sharing it also share one pipeline. */
+  key: string;
   location: LocationInfo;
   /** Registration order: a newer instance wins a tie, so a reload takes over. */
   sequence: number;
@@ -60,9 +62,13 @@ export const resetRegistry = (): void => {
 };
 
 /** Record a live plugin instance, so ownership can be arbitrated between them. */
-export const registerInstance = (registry: TracingRegistry, location: LocationInfo): number => {
+export const registerInstance = (
+  registry: TracingRegistry,
+  key: string,
+  location: LocationInfo,
+): number => {
   const id = ++registry.sequence;
-  registry.instances.set(id, { location, sequence: id });
+  registry.instances.set(id, { key, location, sequence: id });
   return id;
 };
 
@@ -80,7 +86,9 @@ export const unregisterInstance = (registry: TracingRegistry, id: number): void 
  * is neither traced twice nor split between two tracers.
  *
  * Comparison is not limited to one key: a project nested inside another one wins
- * its own sessions over the enclosing project's instance.
+ * its own sessions over the enclosing project's instance. A payload without a
+ * location is compared within one pipeline only, since nothing says which
+ * project it belongs to.
  */
 export const ownsEvent = (
   registry: TracingRegistry,
@@ -89,9 +97,10 @@ export const ownsEvent = (
 ): boolean => {
   const self = registry.instances.get(id);
   if (!self) return false;
-  // A payload without a location cannot be attributed to one instance, so every
-  // live instance keeps its own copy, as before.
-  if (!ref) return true;
+  // A payload without a location names no session and no project: the instances
+  // of one pipeline still arbitrate, but nothing says the payload is ours, so
+  // another project's instance keeps its own copy instead of losing it.
+  const group = ref === undefined ? self.key : undefined;
   const own = coverage(ref, self.location);
   if (own === undefined) return false;
 
@@ -99,6 +108,7 @@ export const ownsEvent = (
   let winner = self.sequence;
   for (const [other, record] of registry.instances) {
     if (other === id) continue;
+    if (group !== undefined && record.key !== group) continue;
     const score = coverage(ref, record.location);
     if (score === undefined) continue;
     // On a tie the newest instance wins, so the one that survives a reload
