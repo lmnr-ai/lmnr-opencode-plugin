@@ -35,6 +35,9 @@ describe("locationKey", () => {
 });
 
 describe("coverage", () => {
+  const rank = (self: LocationInfo, directory: string): number =>
+    coverage({ directory }, self) as number;
+
   it("accepts payloads without a location", () => {
     assert.equal(coverage(undefined, info("/repo")), 0);
   });
@@ -43,9 +46,18 @@ describe("coverage", () => {
     const root = nested("/repo", "/repo");
     const sub = nested("/repo/src", "/repo");
 
-    assert.equal(coverage({ directory: "/repo/src" }, root), 2);
-    assert.equal(coverage({ directory: "/repo/src" }, sub), 3);
-    assert.ok((coverage({ directory: "/repo/src" }, sub) as number) > (coverage({ directory: "/repo/src" }, root) as number));
+    assert.equal(rank(sub, "/repo/src"), 3);
+    assert.equal(rank(root, "/repo/src"), 1.5);
+    assert.ok(rank(sub, "/repo/src") > rank(root, "/repo/src"));
+  });
+
+  it("ranks a nested location above the root that also encloses the session", () => {
+    const root = nested("/repo", "/repo");
+    const sub = nested("/repo/src", "/repo");
+    const deep = "/repo/src/deep/nested";
+
+    assert.ok(rank(sub, deep) > rank(root, deep));
+    assert.ok(rank(root, deep) > 1);
   });
 
   it("accepts a directory of the same project, at a lower rank", () => {
@@ -54,8 +66,8 @@ describe("coverage", () => {
   });
 
   it("accepts the project directory and its subdirectories", () => {
-    assert.equal(coverage({ directory: "/repo" }, info("/repo")), 3);
-    assert.equal(coverage({ directory: "/repo/src" }, info("/repo")), 2);
+    assert.equal(rank(info("/repo"), "/repo"), 3);
+    assert.equal(rank(info("/repo"), "/repo/src"), 1.5);
   });
 
   it("rejects another project", () => {

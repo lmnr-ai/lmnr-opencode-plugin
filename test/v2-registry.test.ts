@@ -56,6 +56,19 @@ describe("ownsEvent", () => {
     assert.equal(ownsEvent(registry, root, { directory: "/repo/src" }), false);
   });
 
+  it("lets the deepest enclosing instance win, whatever the load order", () => {
+    const registry = createRegistry();
+    register(registry, info("/repo/src", "/repo"));
+    // The parent loads last, so a tie on coverage would hand it the events.
+    const root = register(registry, info("/repo"));
+    const sub = register(registry, info("/repo/src", "/repo"));
+    const deep = { directory: "/repo/src/packages/app" };
+
+    assert.ok(sub > root);
+    assert.equal(ownsEvent(registry, sub, deep), true);
+    assert.equal(ownsEvent(registry, root, deep), false);
+  });
+
   it("keeps the enclosing instance for directories no instance was loaded for", () => {
     const registry = createRegistry();
     const root = register(registry, info("/repo"));
@@ -91,6 +104,9 @@ describe("ownsEvent", () => {
 
     assert.equal(ownsEvent(registry, inner, { directory: "/repo/vendor/lib" }), true);
     assert.equal(ownsEvent(registry, outer, { directory: "/repo/vendor/lib" }), false);
+    // A subdirectory of the nested project is closer to it than to the root.
+    assert.equal(ownsEvent(registry, inner, { directory: "/repo/vendor/lib/src" }), true);
+    assert.equal(ownsEvent(registry, outer, { directory: "/repo/vendor/lib/src" }), false);
     assert.equal(ownsEvent(registry, outer, { directory: "/repo" }), true);
   });
 
