@@ -40,14 +40,11 @@ const isWithin = (parent: string, child: string): boolean => {
   );
 };
 
-/** How many directories a path is deep: `/a/b` is 2. */
-const segments = (directory: string): number => directory.split(path.sep).filter(Boolean).length;
-
 /** How many directories separate `child` from `parent`, or undefined if neither. */
 const depth = (parent: string, child: string): number | undefined => {
   if (!isWithin(parent, child)) return undefined;
   const relative = path.relative(parent, child);
-  return relative === "" ? 0 : segments(relative);
+  return relative === "" ? 0 : relative.split(path.sep).length;
 };
 
 /**
@@ -61,15 +58,9 @@ const depth = (parent: string, child: string): number | undefined => {
  * segment count, so a location nested in the project always wins the sessions
  * below it over the project root that also contains them.
  *
- * A payload without a location scores by the instance's own depth instead: the
- * project root wins over a nested directory.
  */
-export const coverage = (ref: LocationRef | undefined, self: LocationInfo): number | undefined => {
+export const coverage = (ref: LocationRef, self: LocationInfo): number | undefined => {
   const selfDirectory = path.resolve(self.directory);
-  // A payload without a location names no session, so there is nothing to be
-  // close to: the shallowest instance of a project takes it and a nested one
-  // leaves it alone instead of opening a second copy.
-  if (!ref) return 1 / (1 + segments(selfDirectory));
   // Worktrees are different directories of one workspace: when either side
   // names a workspace, it decides, not the directory.
   const inWorkspace = ref.workspaceID !== undefined || self.workspaceID !== undefined;

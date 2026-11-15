@@ -405,4 +405,21 @@ describe("SessionTracer", () => {
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_loop" }));
     assert.equal(byName("opencode turn").length, 1);
   });
+  it("knows a session only once a hook or an event named it", () => {
+    const t = new SessionTracer();
+
+    assert.equal(t.knows("ses_known"), false);
+
+    // A hook alone is enough: it is how a nested instance learns a session
+    // whose events arrive without a location.
+    t.onPrompt(prompt("ses_known", "hello"));
+    assert.equal(t.knows("ses_known"), true);
+
+    // Sessions the tracer never saw stay unknown, so they are not mistaken for
+    // one of its own.
+    assert.equal(t.knows("ses_other"), false);
+
+    t.handle(ev("session.deleted", { sessionID: "ses_known" }));
+    assert.equal(t.knows("ses_known"), false);
+  });
 });
