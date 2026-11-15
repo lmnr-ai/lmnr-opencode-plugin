@@ -103,6 +103,15 @@ export class SessionTracer {
     private readonly locationKey: string = "default",
   ) {}
 
+  /**
+   * Whether this tracer already holds the session, from a hook or an earlier
+   * event. Events without a location are routed by it: only the instance that
+   * received the session's hooks traces them without losing the input.
+   */
+  knows(sessionID: string): boolean {
+    return this.sessions.has(sessionID);
+  }
+
   private session(id: string): SessionState {
     let state = this.sessions.get(id);
     if (!state) {
@@ -519,3 +528,9 @@ export class SessionTracer {
     this.sessions.clear();
   }
 }
+
+/** The session an event belongs to, when it names one. */
+export const eventSession = (event: OpenCodeEvent): string | undefined => {
+  const data = event.data as { sessionID?: unknown } | undefined;
+  return typeof data?.sessionID === "string" ? data.sessionID : undefined;
+};

@@ -12,7 +12,7 @@ import {
   unregisterInstance,
 } from "./registry";
 import type { LocationSpanRouter } from "./router";
-import { SessionTracer } from "./tracer";
+import { eventSession, SessionTracer } from "./tracer";
 import type { PluginContext } from "./types";
 
 const log = (level: "info" | "warn" | "error", message: string) => {
@@ -154,14 +154,22 @@ export const setupV2 = async (ctx: PluginContext) => {
   // plugin per location, and locations nest. They share the pipeline, and the
   // registry picks which of them traces each event. Registered last, so a
   // failed setup leaves no instance behind to swallow the events.
-  const instance = registerInstance(registry, key, ctx.location);
+  const instance = registerInstance(registry, ctx.location);
   const controller = new AbortController();
   void (async () => {
     try {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         // The shared server may deliver events from other projects, and every
         // nested instance of this one: only the closest instance traces them.
-        if (!ownsEvent(registry, instance, event.location)) continue;
+        // `location` is optional, and an event without one can only be traced
+        // by the instance that already holds the session, usually through the
+        // hooks it was the only one to receive.
+        const session = eventSession(event);
+        const owned =
+          event.location !== undefined
+            ? ownsEvent(registry, instance, event.location)
+            : session !== undefined && tracer.knows(session);
+        if (!owned) continue;
         try {
           tracer.handle(event);
         } catch (error) {

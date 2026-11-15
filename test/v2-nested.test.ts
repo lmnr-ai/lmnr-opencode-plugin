@@ -16,11 +16,19 @@ const emit = (event: OpenCodeEvent) => {
   for (const push of subscribers) push(event);
 };
 
-const ctxFor = (directory: string, root: string) =>
-  ({
+type Hook = (payload: any) => void | Promise<void>;
+
+const ctxFor = (directory: string, root: string) => {
+  // The host delivers a session's hooks to the Location that owns it.
+  const hooks = new Map<string, Hook>();
+  const ctx = {
     location: { directory, project: { id: root, directory: root, canonical: root } },
     options: { projectApiKey: "test", baseUrl: "http://127.0.0.1:1" },
-    session: { hook: async () => {} },
+    session: {
+      hook: async (name: string, handler: Hook) => {
+        hooks.set(name, handler);
+      },
+    },
     event: {
       subscribe: (opts: { signal?: AbortSignal } = {}) => {
         const queue: OpenCodeEvent[] = [];
@@ -47,7 +55,9 @@ const ctxFor = (directory: string, root: string) =>
         })();
       },
     },
-  }) as unknown as PluginContext;
+  };
+  return { ctx: ctx as unknown as PluginContext, hooks };
+};
 
 let clock = 1_700_000_000_000;
 const ev = (type: string, data: Record<string, unknown>, directory?: string) =>
@@ -67,6 +77,7 @@ const turn = (sessionID: string, directory?: string) => {
 const turns = () => exporter.getFinishedSpans().filter((span) => span.name === "opencode turn");
 
 const exporter = new InMemorySpanExporter();
+const cleanups: Array<() => void | Promise<void>> = [];
 
 after(async () => {
   for (const cleanup of cleanups) await cleanup();
@@ -74,30 +85,30 @@ after(async () => {
   resetRegistry();
 });
 
-const cleanups: Array<() => Promise<void>> = [];
+const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
 describe("nested locations", () => {
   it("traces a session once, through the closest instance", async () => {
     const root = ctxFor("/tmp/lmnr-nested-integration", "/tmp/lmnr-nested-integration");
-    const sub = ctxFor(`${root.location.directory}/packages/app`, root.location.directory);
+    const sub = ctxFor(`${root.ctx.location.directory}/packages/app`, root.ctx.location.directory);
 
-    const rootCleanup = await setupV2(root);
-    const subCleanup = await setupV2(sub);
+    const rootCleanup = await setupV2(root.ctx);
+    const subCleanup = await setupV2(sub.ctx);
     if (rootCleanup) cleanups.push(rootCleanup);
     if (subCleanup) cleanups.push(subCleanup);
 
     // Both instances share the pipeline; route it to an in-memory exporter so
     // the test can count the spans the session produced.
     tracingRegistry().router.register(
-      locationKey(root.location),
+      locationKey(root.ctx.location),
       new LaminarSpanProcessor({ spanProcessor: new SimpleSpanProcessor(exporter) }),
     );
 
     // Let the two subscriptions start before the events arrive.
     await new Promise((resolve) => setImmediate(resolve));
 
-    turn("ses_in_subdirectory", sub.location.directory);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    turn("ses_in_subdirectory", sub.ctx.location.directory);
+    await settle();
 
     const located = turns();
     assert.equal(located.length, 1);
@@ -107,11 +118,26 @@ describe("nested locations", () => {
     );
 
     exporter.reset();
-    // `location` is optional on the payload: a nested instance must not trace
-    // the same legacy event again.
-    turn("ses_without_location");
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // `location` is optional on the payload. The nested instance is the one
+    // that received the session's hooks, so it is the one that must trace the
+    // events, with the prompt the hook recorded.
+    const sessionID = "ses_without_location";
+    const messageID = "msg_1";
+    await sub.hooks.get("prompt")!({
+      sessionID,
+      messageID,
+      prompt: { text: "hello from the nested hook" },
+      delivery: "steer",
+    });
+    emit(ev("session.inbox.enqueued", { sessionID, inboxID: messageID, item: {} }));
+    turn(sessionID);
+    await settle();
 
-    assert.equal(turns().length, 1);
+    const unlocated = turns();
+    assert.equal(unlocated.length, 1);
+    assert.equal(
+      JSON.parse(unlocated[0]?.attributes["lmnr.span.input"] as string).text,
+      "hello from the nested hook",
+    );
   });
 });
