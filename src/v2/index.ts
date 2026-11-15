@@ -154,7 +154,7 @@ export const setupV2 = async (ctx: PluginContext) => {
   // plugin per location, and locations nest. They share the pipeline, and the
   // registry picks which of them traces each event. Registered last, so a
   // failed setup leaves no instance behind to swallow the events.
-  const instance = registerInstance(registry, ctx.location);
+  const instance = registerInstance(registry, key, ctx.location);
   const controller = new AbortController();
   void (async () => {
     try {

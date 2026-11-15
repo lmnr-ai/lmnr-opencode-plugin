@@ -40,11 +40,14 @@ const isWithin = (parent: string, child: string): boolean => {
   );
 };
 
+/** How many directories a path is deep: `/a/b` is 2. */
+const segments = (directory: string): number => directory.split(path.sep).filter(Boolean).length;
+
 /** How many directories separate `child` from `parent`, or undefined if neither. */
 const depth = (parent: string, child: string): number | undefined => {
   if (!isWithin(parent, child)) return undefined;
   const relative = path.relative(parent, child);
-  return relative === "" ? 0 : relative.split(path.sep).length;
+  return relative === "" ? 0 : segments(relative);
 };
 
 /**
@@ -57,23 +60,27 @@ const depth = (parent: string, child: string): number | undefined => {
  * instances the score decreases with their distance: a closed fraction of the
  * segment count, so a location nested in the project always wins the sessions
  * below it over the project root that also contains them.
+ *
+ * A payload without a location scores by the instance's own depth instead: the
+ * project root wins over a nested directory.
  */
 export const coverage = (ref: LocationRef | undefined, self: LocationInfo): number | undefined => {
-  // A missing location means an older payload: it belongs to everyone, so it
-  // cannot be arbitrated.
-  if (!ref) return 0;
+  const selfDirectory = path.resolve(self.directory);
+  // A payload without a location names no session, so there is nothing to be
+  // close to: the shallowest instance of a project takes it and a nested one
+  // leaves it alone instead of opening a second copy.
+  if (!ref) return 1 / (1 + segments(selfDirectory));
   // Worktrees are different directories of one workspace: when either side
   // names a workspace, it decides, not the directory.
   const inWorkspace = ref.workspaceID !== undefined || self.workspaceID !== undefined;
   if (inWorkspace && ref.workspaceID !== self.workspaceID) return undefined;
 
-  const selfDirectory = path.resolve(self.directory);
   const eventDirectory = path.resolve(ref.directory);
   if (eventDirectory === selfDirectory) return 3;
   // Sessions opened in a subdirectory of the instance still belong to it, the
   // closest of its ancestors winning when several of them are loaded.
-  const segments = depth(selfDirectory, eventDirectory);
-  if (segments !== undefined) return 2 - segments / (segments + 1);
+  const distance = depth(selfDirectory, eventDirectory);
+  if (distance !== undefined) return 2 - distance / (distance + 1);
   // Another directory of the same project, or another worktree of the same
   // workspace: a closer instance may exist, but this one is still a valid owner.
   if (inWorkspace) return 1;

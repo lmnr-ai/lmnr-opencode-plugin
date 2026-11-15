@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { LocationInfo } from "../src/v2/location";
+import { locationKey, type LocationInfo } from "../src/v2/location";
 import {
   createRegistry,
   ownsEvent,
@@ -18,7 +18,7 @@ const info = (directory: string, root = directory, id = "project") =>
   }) as LocationInfo;
 
 const register = (registry: ReturnType<typeof createRegistry>, location: LocationInfo) =>
-  registerInstance(registry, location);
+  registerInstance(registry, locationKey(location), location);
 
 describe("tracing registry", () => {
   it("is shared by every copy of the plugin module", async () => {
@@ -117,15 +117,25 @@ describe("ownsEvent", () => {
     assert.equal(ownsEvent(registry, self, { directory: "/other" }), false);
   });
 
-  it("keeps a payload without a location in every instance", () => {
+  it("gives a payload without a location to the shallowest instance of the project", () => {
     const registry = createRegistry();
     const root = register(registry, info("/repo"));
     const sub = register(registry, info("/repo/src", "/repo"));
 
-    // Older OpenCode payloads carry no location: there is no way to tell which
-    // instance they belong to, so neither is silently starved.
+    // `location` is optional: without it a nested instance must not open a
+    // second copy of the same spans.
     assert.equal(ownsEvent(registry, root, undefined), true);
-    assert.equal(ownsEvent(registry, sub, undefined), true);
+    assert.equal(ownsEvent(registry, sub, undefined), false);
+  });
+
+  it("leaves a payload without a location to every project", () => {
+    const registry = createRegistry();
+    const first = register(registry, info("/a"));
+    const second = register(registry, info("/b"));
+
+    // Nothing says whose it is, so neither project loses it.
+    assert.equal(ownsEvent(registry, first, undefined), true);
+    assert.equal(ownsEvent(registry, second, undefined), true);
   });
 
   it("does not let an unregistered instance trace anything", () => {
