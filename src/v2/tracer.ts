@@ -523,6 +523,17 @@ export class SessionTracer {
   }
 
   // Ends everything still open, e.g. when the plugin unloads.
+  /**
+   * Close the spans of a session this tracer stopped owning, keeping its state:
+   * the events that would end them go to the instance that took the session
+   * over, so they would otherwise stay open until this plugin unloads.
+   */
+  abandon(sessionID: string, reason = "session moved to another instance") {
+    const state = this.sessions.get(sessionID);
+    if (!state) return;
+    this.endTurn(state, Date.now(), reason);
+  }
+
   shutdown(reason = "plugin unloaded") {
     for (const state of this.sessions.values()) this.endTurn(state, Date.now(), reason);
     this.sessions.clear();
