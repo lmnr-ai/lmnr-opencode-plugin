@@ -117,6 +117,12 @@ describe("nested locations", () => {
       "ses_in_subdirectory",
     );
 
+    // The session is claimed: a later event without a location stays with the
+    // same tracer instead of reopening the conversation at the root.
+    turn("ses_in_subdirectory");
+    await settle();
+    assert.equal(turns().length, 2);
+
     exporter.reset();
     // `location` is optional on the payload. The nested instance is the one
     // that received the session's hooks, so it is the one that must trace the
