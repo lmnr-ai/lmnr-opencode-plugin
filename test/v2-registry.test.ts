@@ -170,6 +170,24 @@ describe("ownsSession", () => {
     assert.equal(ownsSession(registry, root, "ses_3", undefined, false), true);
   });
 
+  it("returns the session to the nested instance that comes back", () => {
+    const registry = createRegistry();
+    const root = register(registry, info("/repo"));
+    const sub = register(registry, info("/repo/src", "/repo"));
+    const located = { directory: "/repo/src" };
+
+    assert.equal(ownsSession(registry, sub, "ses_5", located, false), true);
+    // A reload unregisters the nested instance: the root traces in its place.
+    unregisterInstance(registry, sub);
+    assert.equal(ownsSession(registry, root, "ses_5", undefined, false), true);
+
+    // It comes back and owns the session again on the next event of any kind,
+    // so the hooks it receives and the events stay together.
+    const again = register(registry, info("/repo/src", "/repo"));
+    assert.equal(ownsSession(registry, again, "ses_5", undefined, false), true);
+    assert.equal(ownsSession(registry, root, "ses_5", undefined, false), false);
+  });
+
   it("forgets a session that ended", () => {
     const registry = createRegistry();
     const root = register(registry, info("/repo"));
