@@ -169,7 +169,13 @@ export const setupV2 = async (ctx: PluginContext) => {
           session !== undefined
             ? ownsSession(registry, instance, session, event.location, tracer.knows(session))
             : event.location !== undefined && ownsEvent(registry, instance, event.location);
-        if (!owned) continue;
+        if (!owned) {
+          // Another instance owns the session now: it receives the events that
+          // would end these spans, so close them here instead of leaving them
+          // open until this plugin unloads.
+          if (session !== undefined) tracer.abandon(session);
+          continue;
+        }
         try {
           tracer.handle(event);
         } catch (error) {

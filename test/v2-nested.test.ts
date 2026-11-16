@@ -146,4 +146,36 @@ describe("nested locations", () => {
       "hello from the nested hook",
     );
   });
+
+  it("closes the turn of the instance a reload takes the session from", async () => {
+    exporter.reset();
+    const directory = "/tmp/lmnr-nested-reload";
+    const root = ctxFor(directory, directory);
+    const rootCleanup = await setupV2(root.ctx);
+    if (rootCleanup) cleanups.push(rootCleanup);
+
+    tracingRegistry().router.register(
+      locationKey(root.ctx.location),
+      new LaminarSpanProcessor({ spanProcessor: new SimpleSpanProcessor(exporter) }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The nested location is not loaded yet, so the root traces the session.
+    const sessionID = "ses_reload";
+    emit(ev("session.execution.started", { sessionID }, `${directory}/packages/app`));
+    await settle();
+    assert.equal(turns().length, 0);
+
+    // A reload loads the nested location, which is closer to the session: the
+    // root must close the turn it can no longer end, instead of leaking it.
+    const sub = ctxFor(`${directory}/packages/app`, directory);
+    const subCleanup = await setupV2(sub.ctx);
+    if (subCleanup) cleanups.push(subCleanup);
+    emit(ev("session.execution.succeeded", { sessionID }, `${directory}/packages/app`));
+    await settle();
+
+    const exported = turns();
+    assert.equal(exported.length, 1);
+    assert.equal(exported[0]?.status.message, "session moved to another instance");
+  });
 });
