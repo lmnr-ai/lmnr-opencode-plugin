@@ -164,8 +164,10 @@ describe("ownsSession", () => {
     assert.equal(ownsSession(registry, sub, "ses_3", located, false), true);
     unregisterInstance(registry, sub);
 
+    // The remembered location elects the root, even though the event itself
+    // carries none: the conversation is not dropped after a reload.
     assert.equal(ownsSession(registry, sub, "ses_3", undefined, true), false);
-    assert.equal(ownsSession(registry, root, "ses_3", located, false), true);
+    assert.equal(ownsSession(registry, root, "ses_3", undefined, false), true);
   });
 
   it("forgets a session that ended", () => {
@@ -173,6 +175,7 @@ describe("ownsSession", () => {
     const root = register(registry, info("/repo"));
 
     assert.equal(ownsSession(registry, root, "ses_4", { directory: "/repo" }, false), true);
+    assert.equal(registry.sessions.get("ses_4")?.owner, root);
     releaseSession(registry, "ses_4");
     assert.equal(registry.sessions.has("ses_4"), false);
 
