@@ -22,6 +22,8 @@ export interface TracingRegistry {
   entries: Map<string, ProcessorEntry>;
   /** The live plugin instances, by id, in registration order. */
   instances: Map<number, InstanceRecord>;
+  /** The instance that traces each session, by session id. */
+  sessions: Map<string, number>;
   sequence: number;
 }
 
@@ -32,6 +34,7 @@ export const createRegistry = (): TracingRegistry => ({
   installed: false,
   entries: new Map(),
   instances: new Map(),
+  sessions: new Map(),
   sequence: 0,
 });
 
@@ -71,7 +74,7 @@ export const unregisterInstance = (registry: TracingRegistry, id: number): void 
 };
 
 /**
- * Whether `id` is the instance that traces `ref`.
+ * The instance that traces `ref`: the closest live one, the newest on a tie.
  *
  * OpenCode loads the plugin once per location, and the locations of one project
  * nest: the project root and a directory inside it both receive every event of
@@ -82,24 +85,66 @@ export const unregisterInstance = (registry: TracingRegistry, id: number): void 
  * Comparison is not limited to one key: a project nested inside another one wins
  * its own sessions over the enclosing project's instance.
  */
-export const ownsEvent = (registry: TracingRegistry, id: number, ref: LocationRef): boolean => {
-  const self = registry.instances.get(id);
-  if (!self) return false;
-  const own = coverage(ref, self.location);
-  if (own === undefined) return false;
-
-  let best = own;
-  let winner = self.sequence;
-  for (const [other, record] of registry.instances) {
-    if (other === id) continue;
+export const closestOwner = (
+  registry: TracingRegistry,
+  ref: LocationRef,
+): number | undefined => {
+  let winner: number | undefined;
+  let best = Number.NEGATIVE_INFINITY;
+  let bestSequence = Number.NEGATIVE_INFINITY;
+  for (const [id, record] of registry.instances) {
     const score = coverage(ref, record.location);
     if (score === undefined) continue;
     // On a tie the newest instance wins, so the one that survives a reload
     // takes the events over from the one being unloaded.
-    if (score > best || (score === best && record.sequence > winner)) {
+    if (score > best || (score === best && record.sequence > bestSequence)) {
       best = score;
-      winner = record.sequence;
+      bestSequence = record.sequence;
+      winner = id;
     }
   }
-  return winner === self.sequence;
+  return winner;
+};
+
+/** Whether `id` is the instance that traces `ref`. */
+export const ownsEvent = (registry: TracingRegistry, id: number, ref: LocationRef): boolean =>
+  registry.instances.has(id) && closestOwner(registry, ref) === id;
+
+/**
+ * Whether `id` traces the events of `sessionID`.
+ *
+ * A session belongs to one live instance until it goes away: otherwise a reload
+ * of a nested location, or the hooks of a session arriving at one instance and
+ * its events at another, would split the conversation between two tracers. The
+ * first event decides, by its location when it has one and by the tracer that
+ * already holds the session (through its hooks) when it does not, and every
+ * later event of the session follows that owner.
+ */
+export const ownsSession = (
+  registry: TracingRegistry,
+  id: number,
+  sessionID: string,
+  location: LocationRef | undefined,
+  knowsSession: boolean,
+): boolean => {
+  if (!registry.instances.has(id)) return false;
+  const owner = registry.sessions.get(sessionID);
+  if (owner !== undefined && registry.instances.has(owner)) return owner === id;
+
+  // The session has no live owner: the closest instance to a located event
+  // takes it, and without a location only the one that already holds it can.
+  const elected =
+    location !== undefined
+      ? closestOwner(registry, location)
+      : knowsSession
+        ? id
+        : undefined;
+  if (elected === undefined) return false;
+  registry.sessions.set(sessionID, elected);
+  return elected === id;
+};
+
+/** Forget a session that ended, so claims do not accumulate. */
+export const releaseSession = (registry: TracingRegistry, sessionID: string): void => {
+  registry.sessions.delete(sessionID);
 };

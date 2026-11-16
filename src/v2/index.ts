@@ -6,7 +6,9 @@ import { endpointLabel, resolveLaminarConfig } from "./config";
 import { locationKey } from "./location";
 import {
   ownsEvent,
+  ownsSession,
   registerInstance,
+  releaseSession,
   type TracingRegistry,
   tracingRegistry,
   unregisterInstance,
@@ -160,20 +162,21 @@ export const setupV2 = async (ctx: PluginContext) => {
     try {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         // The shared server may deliver events from other projects, and every
-        // nested instance of this one: only the closest instance traces them.
-        // `location` is optional, and an event without one can only be traced
-        // by the instance that already holds the session, usually through the
-        // hooks it was the only one to receive.
+        // nested instance of this one: a session belongs to a single instance,
+        // decided by its first event, so it is neither traced twice nor split.
         const session = eventSession(event);
         const owned =
-          event.location !== undefined
-            ? ownsEvent(registry, instance, event.location)
-            : session !== undefined && tracer.knows(session);
+          session !== undefined
+            ? ownsSession(registry, instance, session, event.location, tracer.knows(session))
+            : event.location !== undefined && ownsEvent(registry, instance, event.location);
         if (!owned) continue;
         try {
           tracer.handle(event);
         } catch (error) {
           log("warn", `failed to trace ${event.type}: ${String(error)}`);
+        }
+        if (event.type === "session.deleted" && session !== undefined) {
+          releaseSession(registry, session);
         }
       }
     } catch (error) {
