@@ -14,6 +14,13 @@ export interface InstanceRecord {
   sequence: number;
 }
 
+export interface SessionClaim {
+  /** The instance that traces the session. */
+  owner: number;
+  /** The location the session was last seen at, to elect a new owner. */
+  location?: LocationRef | undefined;
+}
+
 export interface TracingRegistry {
   router: LocationSpanRouter;
   /** True once this process initialized Laminar, as opposed to another plugin. */
@@ -23,7 +30,7 @@ export interface TracingRegistry {
   /** The live plugin instances, by id, in registration order. */
   instances: Map<number, InstanceRecord>;
   /** The instance that traces each session, by session id. */
-  sessions: Map<string, number>;
+  sessions: Map<string, SessionClaim>;
   sequence: number;
 }
 
@@ -118,7 +125,9 @@ export const ownsEvent = (registry: TracingRegistry, id: number, ref: LocationRe
  * its events at another, would split the conversation between two tracers. The
  * first event decides, by its location when it has one and by the tracer that
  * already holds the session (through its hooks) when it does not, and every
- * later event of the session follows that owner.
+ * later event of the session follows that owner. When the owner unloads, the
+ * location the session was last seen at elects the next one, even for an event
+ * that carries no location of its own.
  */
 export const ownsSession = (
   registry: TracingRegistry,
@@ -128,19 +137,23 @@ export const ownsSession = (
   knowsSession: boolean,
 ): boolean => {
   if (!registry.instances.has(id)) return false;
-  const owner = registry.sessions.get(sessionID);
-  if (owner !== undefined && registry.instances.has(owner)) return owner === id;
+  const claim = registry.sessions.get(sessionID);
+  if (claim !== undefined && registry.instances.has(claim.owner)) {
+    if (location !== undefined) claim.location = location;
+    return claim.owner === id;
+  }
 
-  // The session has no live owner: the closest instance to a located event
-  // takes it, and without a location only the one that already holds it can.
+  // The session has no live owner: the closest instance to its location takes
+  // it, and a session never seen anywhere belongs to the tracer that already
+  // holds it.
+  const known = location ?? claim?.location;
   const elected =
-    location !== undefined
-      ? closestOwner(registry, location)
-      : knowsSession
-        ? id
-        : undefined;
+    known !== undefined ? closestOwner(registry, known) : knowsSession ? id : undefined;
   if (elected === undefined) return false;
-  registry.sessions.set(sessionID, elected);
+  registry.sessions.set(sessionID, {
+    owner: elected,
+    ...(known !== undefined ? { location: known } : {}),
+  });
   return elected === id;
 };
 
