@@ -74,9 +74,9 @@ const turn = (sessionID: string, directory?: string) => {
   emit(ev("session.execution.succeeded", { sessionID }, directory));
 };
 
-const turns = () => exporter.getFinishedSpans().filter((span) => span.name === "opencode turn");
+const turns = (exporter: InMemorySpanExporter) =>
+  exporter.getFinishedSpans().filter((span) => span.name === "opencode turn");
 
-const exporter = new InMemorySpanExporter();
 const cleanups: Array<() => void | Promise<void>> = [];
 
 after(async () => {
@@ -87,95 +87,109 @@ after(async () => {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
+const start = async (directory: string, root: string) => {
+  const target = ctxFor(directory, root);
+  const cleanup = await setupV2(target.ctx);
+  if (cleanup) cleanups.push(cleanup);
+  return target;
+};
+
+// The project's spans are routed to an in-memory exporter, whatever pipeline
+// its instances created.
+const capture = (exporter: InMemorySpanExporter, location: PluginContext["location"]) =>
+  tracingRegistry().router.register(
+    locationKey(location),
+    new LaminarSpanProcessor({ spanProcessor: new SimpleSpanProcessor(exporter) }),
+  );
+
+const exporter = new InMemorySpanExporter();
+
 describe("nested locations", () => {
-  it("traces a session once, through the closest instance", async () => {
-    const root = ctxFor("/tmp/lmnr-nested-integration", "/tmp/lmnr-nested-integration");
-    const sub = ctxFor(`${root.ctx.location.directory}/packages/app`, root.ctx.location.directory);
-
-    const rootCleanup = await setupV2(root.ctx);
-    const subCleanup = await setupV2(sub.ctx);
-    if (rootCleanup) cleanups.push(rootCleanup);
-    if (subCleanup) cleanups.push(subCleanup);
-
-    // Both instances share the pipeline; route it to an in-memory exporter so
-    // the test can count the spans the session produced.
-    tracingRegistry().router.register(
-      locationKey(root.ctx.location),
-      new LaminarSpanProcessor({ spanProcessor: new SimpleSpanProcessor(exporter) }),
-    );
-
-    // Let the two subscriptions start before the events arrive.
+  it("traces a turn once, with the hooks of whichever instance received them", async () => {
+    exporter.reset();
+    const root = await start("/tmp/lmnr-nested-hooks", "/tmp/lmnr-nested-hooks");
+    await start(`${root.ctx.location.directory}/packages/app`, root.ctx.location.directory);
+    capture(exporter, root.ctx.location);
     await new Promise((resolve) => setImmediate(resolve));
 
-    turn("ses_in_subdirectory", sub.ctx.location.directory);
-    await settle();
-
-    const located = turns();
-    assert.equal(located.length, 1);
-    assert.equal(
-      located[0]?.attributes["lmnr.association.properties.session_id"],
-      "ses_in_subdirectory",
-    );
-
-    // The session is claimed: a later event without a location stays with the
-    // same tracer instead of reopening the conversation at the root.
-    turn("ses_in_subdirectory");
-    await settle();
-    assert.equal(turns().length, 2);
-
-    exporter.reset();
-    // `location` is optional on the payload. The nested instance is the one
-    // that received the session's hooks, so it is the one that must trace the
-    // events, with the prompt the hook recorded.
-    const sessionID = "ses_without_location";
+    // One project, one tracer: the prompt arrives at the root, the events name
+    // the nested directory, and the turn still gets its input.
+    const sessionID = "ses_split_sources";
     const messageID = "msg_1";
-    await sub.hooks.get("prompt")!({
+    await root.hooks.get("prompt")!({
       sessionID,
       messageID,
-      prompt: { text: "hello from the nested hook" },
+      prompt: { text: "hello from another instance" },
       delivery: "steer",
     });
     emit(ev("session.inbox.enqueued", { sessionID, inboxID: messageID, item: {} }));
-    turn(sessionID);
+    turn(sessionID, `${root.ctx.location.directory}/packages/app`);
     await settle();
 
-    const unlocated = turns();
-    assert.equal(unlocated.length, 1);
+    const traced = turns(exporter);
+    assert.equal(traced.length, 1);
     assert.equal(
-      JSON.parse(unlocated[0]?.attributes["lmnr.span.input"] as string).text,
-      "hello from the nested hook",
+      JSON.parse(traced[0]?.attributes["lmnr.span.input"] as string).text,
+      "hello from another instance",
     );
   });
 
-  it("closes the turn of the instance a reload takes the session from", async () => {
+  it("keeps the turn in flight when the location loads during it", async () => {
     exporter.reset();
-    const directory = "/tmp/lmnr-nested-reload";
-    const root = ctxFor(directory, directory);
-    const rootCleanup = await setupV2(root.ctx);
-    if (rootCleanup) cleanups.push(rootCleanup);
-
-    tracingRegistry().router.register(
-      locationKey(root.ctx.location),
-      new LaminarSpanProcessor({ spanProcessor: new SimpleSpanProcessor(exporter) }),
-    );
+    const root = await start("/tmp/lmnr-nested-reload", "/tmp/lmnr-nested-reload");
+    capture(exporter, root.ctx.location);
     await new Promise((resolve) => setImmediate(resolve));
 
     // The nested location is not loaded yet, so the root traces the session.
     const sessionID = "ses_reload";
-    emit(ev("session.execution.started", { sessionID }, `${directory}/packages/app`));
+    const nested = `${root.ctx.location.directory}/packages/app`;
+    emit(ev("session.execution.started", { sessionID }, nested));
     await settle();
-    assert.equal(turns().length, 0);
+    assert.equal(turns(exporter).length, 0);
 
-    // A reload loads the nested location, which is closer to the session: the
-    // root must close the turn it can no longer end, instead of leaking it.
-    const sub = ctxFor(`${directory}/packages/app`, directory);
-    const subCleanup = await setupV2(sub.ctx);
-    if (subCleanup) cleanups.push(subCleanup);
-    emit(ev("session.execution.succeeded", { sessionID }, `${directory}/packages/app`));
+    // Loading it hands the events over to the instance that is now closest, but
+    // the tracer is the project's, so the same turn is the one that ends.
+    await start(nested, root.ctx.location.directory);
+    emit(ev("session.execution.succeeded", { sessionID }, nested));
     await settle();
 
-    const exported = turns();
-    assert.equal(exported.length, 1);
-    assert.equal(exported[0]?.status.message, "session moved to another instance");
+    const traced = turns(exporter);
+    assert.equal(traced.length, 1);
+    assert.equal(traced[0]?.status.message, undefined);
+  });
+
+  it("leaves a nested project's sessions to the nested project", async () => {
+    exporter.reset();
+    const inner = new InMemorySpanExporter();
+    const outer = await start("/tmp/lmnr-outer-project", "/tmp/lmnr-outer-project");
+    const nested = await start(
+      "/tmp/lmnr-outer-project/vendor/lib",
+      "/tmp/lmnr-outer-project/vendor/lib",
+    );
+    capture(exporter, outer.ctx.location);
+    capture(inner, nested.ctx.location);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    turn("ses_nested_project", nested.ctx.location.directory);
+    await settle();
+
+    assert.equal(turns(inner).length, 1);
+    assert.equal(turns(exporter).length, 0);
+  });
+
+  it("leaves another project's sessions to that project", async () => {
+    exporter.reset();
+    const other = new InMemorySpanExporter();
+    const first = await start("/tmp/lmnr-project-one", "/tmp/lmnr-project-one");
+    const second = await start("/tmp/lmnr-project-two", "/tmp/lmnr-project-two");
+    capture(exporter, first.ctx.location);
+    capture(other, second.ctx.location);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    turn("ses_project_one", first.ctx.location.directory);
+    await settle();
+
+    assert.equal(turns(exporter).length, 1);
+    assert.equal(turns(other).length, 0);
   });
 });

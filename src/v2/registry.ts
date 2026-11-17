@@ -2,10 +2,27 @@ import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
 
 import { coverage, type LocationInfo, type LocationRef } from "./location";
 import { LocationSpanRouter } from "./router";
+import type { SessionTracer } from "./tracer";
 
-export interface ProcessorEntry {
+/**
+ * One OpenCode project: its exporter pipeline and the single tracer that builds
+ * its spans.
+ *
+ * Both outlive a plugin reload, and both are shared by every instance of the
+ * project, so hooks that arrive at one instance and events that arrive at
+ * another still meet in one place.
+ */
+export interface PipelineEntry {
+  /** The resolved configuration, to notice a change. Holds the key: never log it. */
   signature: string;
   processor: SpanProcessor;
+  tracer: SessionTracer;
+  /** Flushes started by a turn end, awaited by the cleanup of any instance. */
+  inFlight: Set<Promise<void>>;
+  /** How many live plugin instances forward into this pipeline. */
+  instances: number;
+  /** Unregisters the processor from the router, if it is still the current one. */
+  detach: () => boolean;
 }
 
 export interface InstanceRecord {
@@ -14,23 +31,14 @@ export interface InstanceRecord {
   sequence: number;
 }
 
-export interface SessionClaim {
-  /** The instance that traces the session. */
-  owner: number;
-  /** The location the session was last seen at, to elect a new owner. */
-  location?: LocationRef | undefined;
-}
-
 export interface TracingRegistry {
   router: LocationSpanRouter;
   /** True once this process initialized Laminar, as opposed to another plugin. */
   installed: boolean;
   /** One pipeline per project, keyed by the location key. */
-  entries: Map<string, ProcessorEntry>;
+  entries: Map<string, PipelineEntry>;
   /** The live plugin instances, by id, in registration order. */
   instances: Map<number, InstanceRecord>;
-  /** The instance that traces each session, by session id. */
-  sessions: Map<string, SessionClaim>;
   sequence: number;
 }
 
@@ -41,7 +49,6 @@ export const createRegistry = (): TracingRegistry => ({
   installed: false,
   entries: new Map(),
   instances: new Map(),
-  sessions: new Map(),
   sequence: 0,
 });
 
@@ -81,13 +88,13 @@ export const unregisterInstance = (registry: TracingRegistry, id: number): void 
 };
 
 /**
- * The instance that traces `ref`: the closest live one, the newest on a tie.
+ * The instance that owns `ref`: the closest live one, the newest on a tie.
  *
  * OpenCode loads the plugin once per location, and the locations of one project
  * nest: the project root and a directory inside it both receive every event of
- * the shared server. The pipeline is keyed by the project, so they share an
- * exporter; this picks the single instance closest to the event, so the session
- * is neither traced twice nor split between two tracers.
+ * the shared server. Instances of one project share a pipeline, so handling an
+ * event twice is harmless, but the payload still has to reach the right
+ * project's pipeline; the closest instance is the one that forwards it.
  *
  * Comparison is not limited to one key: a project nested inside another one wins
  * its own sessions over the enclosing project's instance.
@@ -116,52 +123,3 @@ export const closestOwner = (
 /** Whether `id` is the instance that traces `ref`. */
 export const ownsEvent = (registry: TracingRegistry, id: number, ref: LocationRef): boolean =>
   registry.instances.has(id) && closestOwner(registry, ref) === id;
-
-/**
- * Whether `id` traces the events of `sessionID`.
- *
- * A session belongs to the closest live instance to its own location, which is
- * also the instance the host delivers its hooks to, so the input and the events
- * meet in one tracer. The location is the one the session was first seen at and
- * is remembered, because an event without a location carries none of its own.
- *
- * Deriving the owner instead of pinning it to whoever happened to take the
- * session over means a reload cannot misfile it: while a nested instance is
- * unloaded the root traces the session, and as soon as the nested instance is
- * back it owns the session again, with the hooks that came back with it.
- */
-export const ownsSession = (
-  registry: TracingRegistry,
-  id: number,
-  sessionID: string,
-  location: LocationRef | undefined,
-  knowsSession: boolean,
-): boolean => {
-  if (!registry.instances.has(id)) return false;
-  const claim = registry.sessions.get(sessionID);
-
-  // The session's own location, remembered from its first event, decides.
-  const known = claim?.location ?? location;
-  if (known !== undefined) {
-    const elected = closestOwner(registry, known);
-    if (elected === undefined) return false;
-    registry.sessions.set(sessionID, { owner: elected, location: known });
-    return elected === id;
-  }
-
-  // A session never seen at any location belongs to the instance that holds it.
-  const owner =
-    claim !== undefined && registry.instances.has(claim.owner)
-      ? claim.owner
-      : knowsSession
-        ? id
-        : undefined;
-  if (owner === undefined) return false;
-  registry.sessions.set(sessionID, { owner });
-  return owner === id;
-};
-
-/** Forget a session that ended, so claims do not accumulate. */
-export const releaseSession = (registry: TracingRegistry, sessionID: string): void => {
-  registry.sessions.delete(sessionID);
-};

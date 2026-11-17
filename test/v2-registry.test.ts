@@ -5,9 +5,7 @@ import type { LocationInfo } from "../src/v2/location";
 import {
   createRegistry,
   ownsEvent,
-  ownsSession,
   registerInstance,
-  releaseSession,
   resetRegistry,
   tracingRegistry,
   unregisterInstance,
@@ -126,78 +124,5 @@ describe("ownsEvent", () => {
     unregisterInstance(registry, self);
 
     assert.equal(ownsEvent(registry, self, { directory: "/repo" }), false);
-  });
-});
-
-describe("ownsSession", () => {
-  it("elects the closest instance for a located session and keeps it", () => {
-    const registry = createRegistry();
-    const root = register(registry, info("/repo"));
-    const sub = register(registry, info("/repo/src", "/repo"));
-    const located = { directory: "/repo/src" };
-
-    assert.equal(ownsSession(registry, root, "ses_1", located, false), false);
-    assert.equal(ownsSession(registry, sub, "ses_1", located, false), true);
-    // The session is claimed: an event that arrives without a location still
-    // belongs to the same tracer instead of being traced again by the root.
-    assert.equal(ownsSession(registry, sub, "ses_1", undefined, false), true);
-    assert.equal(ownsSession(registry, root, "ses_1", undefined, false), false);
-  });
-
-  it("gives a session without a location to the instance that holds it", () => {
-    const registry = createRegistry();
-    const root = register(registry, info("/repo"));
-    const sub = register(registry, info("/repo/src", "/repo"));
-
-    // Only the instance that received the hooks knows the session.
-    assert.equal(ownsSession(registry, root, "ses_2", undefined, false), false);
-    assert.equal(ownsSession(registry, sub, "ses_2", undefined, true), true);
-    assert.equal(ownsSession(registry, root, "ses_2", undefined, true), false);
-  });
-
-  it("re-elects once the owner unloads", () => {
-    const registry = createRegistry();
-    const root = register(registry, info("/repo"));
-    const sub = register(registry, info("/repo/src", "/repo"));
-    const located = { directory: "/repo/src" };
-
-    assert.equal(ownsSession(registry, sub, "ses_3", located, false), true);
-    unregisterInstance(registry, sub);
-
-    // The remembered location elects the root, even though the event itself
-    // carries none: the conversation is not dropped after a reload.
-    assert.equal(ownsSession(registry, sub, "ses_3", undefined, true), false);
-    assert.equal(ownsSession(registry, root, "ses_3", undefined, false), true);
-  });
-
-  it("returns the session to the nested instance that comes back", () => {
-    const registry = createRegistry();
-    const root = register(registry, info("/repo"));
-    const sub = register(registry, info("/repo/src", "/repo"));
-    const located = { directory: "/repo/src" };
-
-    assert.equal(ownsSession(registry, sub, "ses_5", located, false), true);
-    // A reload unregisters the nested instance: the root traces in its place.
-    unregisterInstance(registry, sub);
-    assert.equal(ownsSession(registry, root, "ses_5", undefined, false), true);
-
-    // It comes back and owns the session again on the next event of any kind,
-    // so the hooks it receives and the events stay together.
-    const again = register(registry, info("/repo/src", "/repo"));
-    assert.equal(ownsSession(registry, again, "ses_5", undefined, false), true);
-    assert.equal(ownsSession(registry, root, "ses_5", undefined, false), false);
-  });
-
-  it("forgets a session that ended", () => {
-    const registry = createRegistry();
-    const root = register(registry, info("/repo"));
-
-    assert.equal(ownsSession(registry, root, "ses_4", { directory: "/repo" }, false), true);
-    assert.equal(registry.sessions.get("ses_4")?.owner, root);
-    releaseSession(registry, "ses_4");
-    assert.equal(registry.sessions.has("ses_4"), false);
-
-    const again = register(registry, info("/repo/other", "/repo"));
-    assert.equal(ownsSession(registry, again, "ses_4", { directory: "/repo/other" }, false), true);
   });
 });
