@@ -1,8 +1,11 @@
 import { Laminar, LaminarAttributes } from "@lmnr-ai/lmnr";
 import { type Context, ROOT_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 
+import { debug } from "../debug";
 import { otelSpanIdToUUID } from "../utils";
+import type { LocationRef } from "./location";
 import { requestMessages, responseMessages, type ToolCall } from "./messages";
+import { LOCATION_METADATA_KEY } from "./router";
 import type { OpenCodeEvent, SessionContextHook, SessionPromptHook } from "./types";
 
 // Tools that start a child session. V2 calls it `subagent`; `task` is the V1 name.
@@ -35,6 +38,8 @@ interface PromptRecord {
 interface SessionState {
   id: string;
   parentID?: string;
+  // The location the session was last seen at, for its events that carry none.
+  location?: LocationRef | undefined;
   // Root sessions get one `opencode turn` span per execution.
   turn?: Span | undefined;
   lastText?: string | undefined;
@@ -93,10 +98,70 @@ const usageAttributes = (tokens: TokenUsage | undefined, cost: number | undefine
   return attributes;
 };
 
+/** How many event ids a tracer remembers to drop the copies of one event. */
+const SEEN_EVENTS = 10_000;
+
 export class SessionTracer {
   private sessions = new Map<string, SessionState>();
+  private readonly seen = new Set<string>();
 
-  constructor(private readonly onTurnEnd: () => void = () => {}) {}
+  constructor(
+    private readonly onTurnEnd: () => void = () => {},
+    private readonly locationKey: string = "default",
+  ) {}
+
+  /**
+   * Whether this tracer should handle `event`.
+   *
+   * One tracer serves every plugin instance of a project, and OpenCode delivers
+   * the whole server stream to each of them, so the same event arrives once per
+   * instance. Only the first copy is traced.
+   */
+  accept(event: OpenCodeEvent): boolean {
+    if (this.seen.has(event.id)) return false;
+    this.seen.add(event.id);
+    if (this.seen.size > SEEN_EVENTS) {
+      const oldest = this.seen.values().next();
+      if (!oldest.done) this.seen.delete(oldest.value);
+    }
+    return true;
+  }
+
+  /**
+   * Whether this tracer already holds the session, from a hook or an earlier
+   * event. An event without a location is traced only for a session its project
+   * is known to own; anything else names no project to attribute it to.
+   */
+  knows(sessionID: string): boolean {
+    return this.sessions.has(sessionID);
+  }
+
+  /** The location the session was last seen at, when it was ever named. */
+  locationOf(sessionID: string): LocationRef | undefined {
+    return this.sessions.get(sessionID)?.location;
+  }
+
+  /**
+   * Close the spans of a session another project owns now, and forget it.
+   *
+   * A session can move between projects: its location is inside a project that
+   * loads (or moves) later, and from then on the other pipeline traces it. The
+   * spans opened here would never see their end events, and the session would
+   * keep answering for events that carry no location, so it goes away with the
+   * subagents it spawned.
+   */
+  abandon(sessionID: string, reason = "session moved to another project") {
+    if (!this.sessions.has(sessionID)) return;
+    // Collect first: deleting the child would cut the grandchild's lineage
+    // before it is reached.
+    const doomed = [...this.sessions].filter(
+      ([id, candidate]) => id === sessionID || this.rootSessionId(candidate) === sessionID,
+    );
+    for (const [id, candidate] of doomed) {
+      this.endTurn(candidate, Date.now(), reason);
+      this.sessions.delete(id);
+    }
+  }
 
   private session(id: string): SessionState {
     let state = this.sessions.get(id);
@@ -178,6 +243,7 @@ export class SessionTracer {
       ...(options.startTime !== undefined ? { startTime: options.startTime } : {}),
       sessionId: this.rootSessionId(state),
       context: this.parentContext(state),
+      metadata: { [LOCATION_METADATA_KEY]: this.locationKey },
     });
     span.setAttributes({ ...this.spawnAttributes(state), ...options.attributes });
     return span;
@@ -201,10 +267,12 @@ export class SessionTracer {
       input,
       sessionId: state.id,
       ...(startTime !== undefined ? { startTime } : {}),
+      metadata: { [LOCATION_METADATA_KEY]: this.locationKey },
       ...(state.externalContext
         ? { parentSpanContext: state.externalContext }
         : { context: ROOT_CONTEXT }),
     });
+    debug(`turn start ${this.locationKey} ${state.id}`);
   }
 
   private endTurn(state: SessionState, endTime: number, error?: string) {
@@ -219,6 +287,7 @@ export class SessionTracer {
     if (error) fail(state.turn, error);
     state.turn.end(endTime);
     state.turn = undefined;
+    debug(`turn end ${this.locationKey} ${state.id}`);
     this.onTurnEnd();
   }
 
@@ -282,6 +351,10 @@ export class SessionTracer {
   // ---- events ----
 
   handle(event: OpenCodeEvent) {
+    const sessionID = eventSession(event);
+    if (event.location !== undefined && sessionID !== undefined) {
+      this.session(sessionID).location = event.location;
+    }
     switch (event.type) {
       case "session.created": {
         const state = this.session(event.data.sessionID);
@@ -510,3 +583,9 @@ export class SessionTracer {
     this.sessions.clear();
   }
 }
+
+/** The session an event belongs to, when it names one. */
+export const eventSession = (event: OpenCodeEvent): string | undefined => {
+  const data = event.data as { sessionID?: unknown } | undefined;
+  return typeof data?.sessionID === "string" ? data.sessionID : undefined;
+};
