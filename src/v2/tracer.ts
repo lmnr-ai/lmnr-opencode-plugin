@@ -3,6 +3,7 @@ import { type Context, ROOT_CONTEXT, type Span, SpanStatusCode, trace } from "@o
 
 import { debug } from "../debug";
 import { otelSpanIdToUUID } from "../utils";
+import type { LocationRef } from "./location";
 import { requestMessages, responseMessages, type ToolCall } from "./messages";
 import { LOCATION_METADATA_KEY } from "./router";
 import type { OpenCodeEvent, SessionContextHook, SessionPromptHook } from "./types";
@@ -37,6 +38,8 @@ interface PromptRecord {
 interface SessionState {
   id: string;
   parentID?: string;
+  // The location the session was last seen at, for its events that carry none.
+  location?: LocationRef | undefined;
   // Root sessions get one `opencode turn` span per execution.
   turn?: Span | undefined;
   lastText?: string | undefined;
@@ -131,6 +134,30 @@ export class SessionTracer {
    */
   knows(sessionID: string): boolean {
     return this.sessions.has(sessionID);
+  }
+
+  /** The location the session was last seen at, when it was ever named. */
+  locationOf(sessionID: string): LocationRef | undefined {
+    return this.sessions.get(sessionID)?.location;
+  }
+
+  /**
+   * Close the spans of a session another project owns now, and forget it.
+   *
+   * A session can move between projects: its location is inside a project that
+   * loads (or moves) later, and from then on the other pipeline traces it. The
+   * spans opened here would never see their end events, and the session would
+   * keep answering for events that carry no location, so it goes away with the
+   * subagents it spawned.
+   */
+  abandon(sessionID: string, reason = "session moved to another project") {
+    const state = this.sessions.get(sessionID);
+    if (!state) return;
+    for (const [id, candidate] of [...this.sessions]) {
+      if (id !== sessionID && this.rootSessionId(candidate) !== sessionID) continue;
+      this.endTurn(candidate, Date.now(), reason);
+      this.sessions.delete(id);
+    }
   }
 
   private session(id: string): SessionState {
@@ -321,6 +348,10 @@ export class SessionTracer {
   // ---- events ----
 
   handle(event: OpenCodeEvent) {
+    const sessionID = eventSession(event);
+    if (event.location !== undefined && sessionID !== undefined) {
+      this.session(sessionID).location = event.location;
+    }
     switch (event.type) {
       case "session.created": {
         const state = this.session(event.data.sessionID);

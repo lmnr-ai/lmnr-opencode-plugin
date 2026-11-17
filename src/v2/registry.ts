@@ -26,6 +26,8 @@ export interface PipelineEntry {
 }
 
 export interface InstanceRecord {
+  /** The pipeline this instance forwards into. */
+  key: string;
   location: LocationInfo;
   /** Registration order: a newer instance wins a tie, so a reload takes over. */
   sequence: number;
@@ -77,9 +79,13 @@ export const resetRegistry = (): void => {
 };
 
 /** Record a live plugin instance, so ownership can be arbitrated between them. */
-export const registerInstance = (registry: TracingRegistry, location: LocationInfo): number => {
+export const registerInstance = (
+  registry: TracingRegistry,
+  key: string,
+  location: LocationInfo,
+): number => {
   const id = ++registry.sequence;
-  registry.instances.set(id, { location, sequence: id });
+  registry.instances.set(id, { key, location, sequence: id });
   return id;
 };
 
@@ -120,6 +126,14 @@ export const closestOwner = (
   return winner;
 };
 
-/** Whether `id` is the instance that traces `ref`. */
-export const ownsEvent = (registry: TracingRegistry, id: number, ref: LocationRef): boolean =>
-  registry.instances.has(id) && closestOwner(registry, ref) === id;
+/**
+ * The pipeline that owns `ref`: the key of the closest live instance.
+ *
+ * Every instance of that pipeline forwards the event, which is harmless because
+ * they share one tracer, and an instance that has just been loaded but is not
+ * listening yet cannot take events away from the ones already running.
+ */
+export const ownerKey = (registry: TracingRegistry, ref: LocationRef): string | undefined => {
+  const owner = closestOwner(registry, ref);
+  return owner === undefined ? undefined : registry.instances.get(owner)?.key;
+};

@@ -158,6 +158,61 @@ describe("nested locations", () => {
     assert.equal(traced[0]?.status.message, undefined);
   });
 
+  it("keeps forwarding to a sibling while another instance is starting", async () => {
+    exporter.reset();
+    const base = "/tmp/lmnr-nested-setup";
+    const root = await start(base, base);
+    capture(exporter, root.ctx.location);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const sessionID = "ses_during_setup";
+    const nested = `${base}/packages/app`;
+    emit(ev("session.execution.started", { sessionID }, nested));
+    await settle();
+
+    // The new instance registers only once its hooks are in place, so the turn
+    // that ends during its setup is not taken away from the running one.
+    const loading = setupV2(ctxFor(nested, base).ctx);
+    emit(ev("session.execution.succeeded", { sessionID }, nested));
+    await settle();
+    const cleanup = await loading;
+    if (cleanup) cleanups.push(cleanup);
+
+    assert.equal(turns(exporter).length, 1);
+    assert.equal(turns(exporter)[0]?.status.message, undefined);
+  });
+
+  it("closes the turn of a project that hands a session to a nested project", async () => {
+    exporter.reset();
+    const inner = new InMemorySpanExporter();
+    const base = "/tmp/lmnr-handoff";
+    const outer = await start(base, base);
+    capture(exporter, outer.ctx.location);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const nested = `${base}/vendor/lib`;
+    const sessionID = "ses_handoff";
+    emit(ev("session.execution.started", { sessionID }, nested));
+    await settle();
+
+    // The nested project loads: the session is now its business.
+    const nestedCtx = ctxFor(nested, nested);
+    const cleanup = await setupV2(nestedCtx.ctx);
+    if (cleanup) cleanups.push(cleanup);
+    capture(inner, nestedCtx.ctx.location);
+    emit(ev("session.execution.succeeded", { sessionID }, nested));
+    await settle();
+
+    // The outer project closes the turn it can no longer end, and does not
+    // reopen it for the events that carry no location of their own.
+    turn(sessionID);
+    await settle();
+
+    assert.equal(turns(exporter).length, 1);
+    assert.equal(turns(exporter)[0]?.status.message, "session moved to another project");
+    assert.equal(turns(inner).length, 1);
+  });
+
   it("leaves a nested project's sessions to the nested project", async () => {
     exporter.reset();
     const inner = new InMemorySpanExporter();

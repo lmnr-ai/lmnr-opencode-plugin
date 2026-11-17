@@ -34,8 +34,14 @@ before(() => {
 afterEach(() => exporter.reset());
 
 let clock = 1_700_000_000_000;
-const ev = (type: string, data: Record<string, unknown>) =>
-  ({ id: `evt_${clock}`, type, created: (clock += 10), data }) as unknown as OpenCodeEvent;
+const ev = (type: string, data: Record<string, unknown>, directory?: string) =>
+  ({
+    id: `evt_${clock}`,
+    type,
+    created: (clock += 10),
+    data,
+    ...(directory !== undefined ? { location: { directory } } : {}),
+  }) as unknown as OpenCodeEvent;
 
 const model = { providerID: "anthropic", id: "claude-sonnet-4-5" };
 const tokens = { input: 100, output: 20, reasoning: 5, cache: { read: 50, write: 10 } };
@@ -436,5 +442,44 @@ describe("SessionTracer", () => {
     t.handle(ended);
 
     assert.equal(byName("opencode turn").length, 1);
+  });
+
+  it("remembers the location a session was seen at", () => {
+    const t = new SessionTracer();
+
+    assert.equal(t.locationOf("ses_located"), undefined);
+
+    t.handle(ev("session.created", { sessionID: "ses_located" }, "/repo/app"));
+    assert.deepEqual(t.locationOf("ses_located"), { directory: "/repo/app" });
+  });
+
+  it("forgets a session another project owns, subagents included", () => {
+    const t = new SessionTracer();
+    t.handle(ev("session.execution.started", { sessionID: "ses_parent" }, "/repo/app"));
+    step(t, "ses_parent", "msg_p", {
+      tool: { id: "call_spawn", name: "subagent", input: {} },
+    });
+    t.handle(ev("session.created", { sessionID: "ses_child", parentID: "ses_parent" }));
+    t.handle(ev("session.execution.started", { sessionID: "ses_child" }));
+
+    // A step of the subagent that is still streaming when the handoff happens.
+    t.handle(ev("session.step.started", {
+      sessionID: "ses_child",
+      assistantMessageID: "msg_c",
+      agent: "build",
+      model,
+      started: clock,
+    }));
+    t.abandon("ses_parent");
+
+    // The spans the other project will never end are closed, and neither the
+    // session nor the subagent it spawned keeps answering for its events.
+    assert.equal(t.knows("ses_parent"), false);
+    assert.equal(t.knows("ses_child"), false);
+    const turns = byName("opencode turn");
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0]?.status.message, "session moved to another project");
+    const childLLM = byName("ai.llm anthropic:claude-sonnet-4-5").at(-1);
+    assert.equal(childLLM?.status.message, "session moved to another project");
   });
 });
