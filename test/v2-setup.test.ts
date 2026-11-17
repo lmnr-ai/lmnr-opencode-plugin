@@ -81,15 +81,20 @@ describe("setupV2 nested locations", () => {
     const root = "/tmp/lmnr-setup-nested";
     const sub = `${root}/packages/app`;
 
-    await (await setupV2(ctxFor(root, base, root)))?.();
+    // Both instances stay loaded, as in a server with two nested locations.
+    await setupV2(ctxFor(root, base, root));
     const key = locationKey(ctxFor(root, base, root).location);
-    const processor = tracingRegistry().entries.get(key)?.processor;
+    const pipeline = tracingRegistry().entries.get(key);
     const pipelines = tracingRegistry().entries.size;
 
-    await (await setupV2(ctxFor(sub, base, root)))?.();
+    await setupV2(ctxFor(sub, base, root));
 
     assert.equal(locationKey(ctxFor(sub, base, root).location), key);
-    assert.equal(tracingRegistry().entries.get(key)?.processor, processor);
+    // One exporter and one tracer for the project: hooks and events of its
+    // locations meet in the same state.
+    assert.equal(tracingRegistry().entries.get(key)?.processor, pipeline?.processor);
+    assert.equal(tracingRegistry().entries.get(key)?.tracer, pipeline?.tracer);
+    assert.equal(tracingRegistry().entries.get(key)?.instances, 2);
     assert.equal(tracingRegistry().entries.size, pipelines);
   });
 });

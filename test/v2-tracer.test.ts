@@ -422,22 +422,19 @@ describe("SessionTracer", () => {
     t.handle(ev("session.deleted", { sessionID: "ses_known" }));
     assert.equal(t.knows("ses_known"), false);
   });
-  it("closes the spans of a session another instance took over", () => {
+
+  it("traces each event once, though every instance forwards it", () => {
     const t = new SessionTracer();
-    t.handle(ev("session.execution.started", { sessionID: "ses_moved" }));
-    step(t, "ses_moved", "msg_m", { text: "in flight" });
+    const started = ev("session.execution.started", { sessionID: "ses_twice" });
 
-    assert.equal(byName("opencode turn").length, 0);
+    assert.equal(t.accept(started), true);
+    assert.equal(t.accept(started), false);
+    t.handle(started);
 
-    t.abandon("ses_moved");
+    const ended = ev("session.execution.succeeded", { sessionID: "ses_twice" });
+    assert.equal(t.accept(ended), true);
+    t.handle(ended);
 
-    // The turn span and the step that was open under it are exported, with the
-    // reason on the turn, instead of hanging until the plugin unloads.
-    const [turn] = byName("opencode turn");
-    assert.ok(turn);
-    assert.equal(turn.status.message, "session moved to another instance");
-    assert.equal(byName("ai.llm anthropic:claude-sonnet-4-5").length, 1);
-    // Unknown sessions are a no-op: the loop calls this for every event.
-    assert.doesNotThrow(() => t.abandon("ses_unknown"));
+    assert.equal(byName("opencode turn").length, 1);
   });
 });

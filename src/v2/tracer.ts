@@ -95,8 +95,12 @@ const usageAttributes = (tokens: TokenUsage | undefined, cost: number | undefine
   return attributes;
 };
 
+/** How many event ids a tracer remembers to drop the copies of one event. */
+const SEEN_EVENTS = 10_000;
+
 export class SessionTracer {
   private sessions = new Map<string, SessionState>();
+  private readonly seen = new Set<string>();
 
   constructor(
     private readonly onTurnEnd: () => void = () => {},
@@ -104,9 +108,26 @@ export class SessionTracer {
   ) {}
 
   /**
+   * Whether this tracer should handle `event`.
+   *
+   * One tracer serves every plugin instance of a project, and OpenCode delivers
+   * the whole server stream to each of them, so the same event arrives once per
+   * instance. Only the first copy is traced.
+   */
+  accept(event: OpenCodeEvent): boolean {
+    if (this.seen.has(event.id)) return false;
+    this.seen.add(event.id);
+    if (this.seen.size > SEEN_EVENTS) {
+      const oldest = this.seen.values().next();
+      if (!oldest.done) this.seen.delete(oldest.value);
+    }
+    return true;
+  }
+
+  /**
    * Whether this tracer already holds the session, from a hook or an earlier
-   * event. Events without a location are routed by it: only the instance that
-   * received the session's hooks traces them without losing the input.
+   * event. An event without a location is traced only for a session its project
+   * is known to own; anything else names no project to attribute it to.
    */
   knows(sessionID: string): boolean {
     return this.sessions.has(sessionID);
@@ -523,17 +544,6 @@ export class SessionTracer {
   }
 
   // Ends everything still open, e.g. when the plugin unloads.
-  /**
-   * Close the spans of a session this tracer stopped owning, keeping its state:
-   * the events that would end them go to the instance that took the session
-   * over, so they would otherwise stay open until this plugin unloads.
-   */
-  abandon(sessionID: string, reason = "session moved to another instance") {
-    const state = this.sessions.get(sessionID);
-    if (!state) return;
-    this.endTurn(state, Date.now(), reason);
-  }
-
   shutdown(reason = "plugin unloaded") {
     for (const state of this.sessions.values()) this.endTurn(state, Date.now(), reason);
     this.sessions.clear();

@@ -6,9 +6,8 @@ import { endpointLabel, resolveLaminarConfig } from "./config";
 import { locationKey } from "./location";
 import {
   ownsEvent,
-  ownsSession,
+  type PipelineEntry,
   registerInstance,
-  releaseSession,
   type TracingRegistry,
   tracingRegistry,
   unregisterInstance,
@@ -26,7 +25,8 @@ const log = (level: "info" | "warn" | "error", message: string) => {
 const SHUTDOWN_FLUSH_TIMEOUT_MS = 5_000;
 
 // A pipeline that is replaced keeps exporting the spans that started under it.
-// The grace period is longer than a model turn is likely to stay open.
+// The same grace period covers a project whose last instance unloaded, so a
+// reload keeps the turn in flight while an abandoned one is finally closed.
 const PROCESSOR_RETIRE_MS = 30_000;
 
 // `Laminar.initialize` validates the key even when it is given a span
@@ -69,46 +69,103 @@ const installRouter = (
   return registry.router;
 };
 
-const retireProcessor = (processor: SpanProcessor): void => {
-  const timer = setTimeout(() => {
-    void (async () => {
-      try {
-        await processor.forceFlush?.();
-        await processor.shutdown();
-      } catch (error) {
-        log("warn", `retired pipeline shutdown failed: ${String(error)}`);
-      }
-    })();
-  }, PROCESSOR_RETIRE_MS);
+/** Flush the project's exporter, keeping the promise for the next cleanup. */
+const flush = (entry: PipelineEntry): void => {
+  const pending: Promise<void> = entry.processor
+    .forceFlush()
+    .catch((error: unknown) => log("warn", `flush failed: ${String(error)}`))
+    .finally(() => entry.inFlight.delete(pending));
+  entry.inFlight.add(pending);
+};
+
+const later = (task: () => Promise<void>): void => {
+  const timer = setTimeout(() => void task(), PROCESSOR_RETIRE_MS);
   (timer as unknown as { unref?: () => void }).unref?.();
 };
 
 /**
- * One pipeline per Location, reused across plugin reloads.
+ * Flush and close a pipeline that nothing uses any more.
  *
- * Reloading the plugin must not create a new exporter: the one in flight still
- * holds the open spans of the current turn. It is replaced only when the
- * resolved configuration actually changes.
+ * `cancelled` is checked when the grace period ends: a reload that was already
+ * under way may have taken the pipeline over again in the meantime.
  */
-const acquireProcessor = (
+const retirePipeline = (
+  registry: TracingRegistry,
+  key: string,
+  entry: PipelineEntry,
+  reason: string,
+  cancelled: () => boolean = () => false,
+): void => {
+  later(async () => {
+    if (cancelled()) {
+      debug(`pipeline kept ${key}`);
+      return;
+    }
+    try {
+      entry.tracer.shutdown(reason);
+      await entry.processor.forceFlush?.();
+      await entry.processor.shutdown();
+    } catch (error) {
+      log("warn", `retired pipeline shutdown failed: ${String(error)}`);
+    } finally {
+      entry.detach();
+      if (registry.entries.get(key) === entry) registry.entries.delete(key);
+    }
+  });
+};
+
+/** The project's pipeline, once the last instance of it unloads. */
+const releasePipeline = (
+  registry: TracingRegistry,
+  key: string,
+  entry: PipelineEntry,
+): void => {
+  entry.instances -= 1;
+  if (entry.instances > 0) return;
+  retirePipeline(
+    registry,
+    key,
+    entry,
+    "plugin unloaded",
+    () => entry.instances > 0 || registry.entries.get(key) !== entry,
+  );
+};
+
+/**
+ * One pipeline per project, reused across plugin reloads.
+ *
+ * Reloading the plugin must not create a new exporter or a new tracer: the ones
+ * in flight still hold the open spans and the session state of the current turn.
+ * They are replaced only when the resolved configuration actually changes.
+ */
+const acquirePipeline = (
   registry: TracingRegistry,
   key: string,
   signature: string,
-  create: () => SpanProcessor,
-): SpanProcessor => {
+  createProcessor: () => SpanProcessor,
+): PipelineEntry => {
   const existing = registry.entries.get(key);
   if (existing && existing.signature === signature) {
+    existing.instances += 1;
     debug(`pipeline reused ${key}`);
-    return existing.processor;
+    return existing;
   }
 
-  const processor = create();
-  registry.router.register(key, processor);
-  registry.entries.set(key, { signature, processor });
+  const processor = createProcessor();
+  const entry: PipelineEntry = {
+    signature,
+    processor,
+    inFlight: new Set(),
+    instances: 1,
+    detach: registry.router.register(key, processor),
+    // The callback only runs once a turn ends, long after `entry` exists.
+    tracer: new SessionTracer(() => flush(entry), key),
+  };
+  registry.entries.set(key, entry);
   // The signature contains the project API key: never put it in a log.
   debug(`pipeline created ${key}`);
-  if (existing) retireProcessor(existing.processor);
-  return processor;
+  if (existing) retirePipeline(registry, key, existing, "configuration changed");
+  return entry;
 };
 
 // V2 builds spans from the public event stream and session hooks. The V1
@@ -128,61 +185,71 @@ export const setupV2 = async (ctx: PluginContext) => {
   if (!router) return;
 
   const key = locationKey(ctx.location);
-  const processor = acquireProcessor(registry, key, JSON.stringify(config), () =>
+  const entry = acquirePipeline(registry, key, JSON.stringify(config), () =>
     new LaminarSpanProcessor({
       apiKey: config.projectApiKey,
       baseUrl: config.baseUrl,
       ...(config.port !== undefined ? { port: config.port } : {}),
     }));
-
-  // Turn-end flushes run in the background, but short-lived runs such as
-  // `opencode run` unload the plugin right after the last turn, so cleanup
-  // waits for any flush still in flight.
-  const inFlight = new Set<Promise<void>>();
-  const flush = () => {
-    const pending: Promise<void> = processor
-      .forceFlush()
-      .catch((error: unknown) => log("warn", `flush failed: ${String(error)}`))
-      .finally(() => inFlight.delete(pending));
-    inFlight.add(pending);
-  };
-  const tracer = new SessionTracer(flush, key);
-
-  await ctx.session.hook("prompt", (event) => tracer.onPrompt(event));
-  await ctx.session.hook("context", (event) => tracer.onContext(event, "primary"));
-  await ctx.session.hook("compaction", (event) => tracer.onContext(event, "compaction"));
+  // Every instance of the project forwards into the same tracer, so a hook that
+  // arrives here and an event that arrives at a sibling still meet in one state.
+  const tracer = entry.tracer;
 
   // Several instances of one project can be live at once: OpenCode loads the
-  // plugin per location, and locations nest. They share the pipeline, and the
-  // registry picks which of them traces each event. Registered last, so a
-  // failed setup leaves no instance behind to swallow the events.
+  // plugin per location, and locations nest. They share the pipeline and the
+  // tracer, so forwarding the same event twice is harmless; the closest
+  // instance is the one that owns the project a payload names.
   const instance = registerInstance(registry, ctx.location);
   const controller = new AbortController();
+
+  const stop = async () => {
+    controller.abort();
+    unregisterInstance(registry, instance);
+    // Turn-end flushes run in the background, but short-lived runs such as
+    // `opencode run` unload the plugin right after the last turn, so cleanup
+    // waits for any flush still in flight.
+    flush(entry);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise((done) => (timer = setTimeout(done, SHUTDOWN_FLUSH_TIMEOUT_MS)));
+    await Promise.race([Promise.allSettled(entry.inFlight), timeout]);
+    clearTimeout(timer);
+    // The pipeline stays registered: this unload may be a config reload in the
+    // same process, and the next setup for this Location reuses it. Only when
+    // the last instance of the project goes away is it flushed and closed.
+    releasePipeline(registry, key, entry);
+    debug(`cleanup ${key}`);
+  };
+
+  try {
+    await ctx.session.hook("prompt", (event) => tracer.onPrompt(event));
+    await ctx.session.hook("context", (event) => tracer.onContext(event, "primary"));
+    await ctx.session.hook("compaction", (event) => tracer.onContext(event, "compaction"));
+  } catch (error) {
+    // A setup that fails must not keep the project's pipeline alive, nor an
+    // instance that would win events it cannot trace.
+    await stop();
+    throw error;
+  }
+
   void (async () => {
     try {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        // The shared server may deliver events from other projects, and every
-        // nested instance of this one: a session belongs to a single instance,
-        // decided by its first event, so it is neither traced twice nor split.
         const session = eventSession(event);
-        const owned =
-          session !== undefined
-            ? ownsSession(registry, instance, session, event.location, tracer.knows(session))
-            : event.location !== undefined && ownsEvent(registry, instance, event.location);
-        if (!owned) {
-          // Another instance owns the session now: it receives the events that
-          // would end these spans, so close them here instead of leaving them
-          // open until this plugin unloads.
-          if (session !== undefined) tracer.abandon(session);
-          continue;
-        }
+        // The shared server delivers every project's events to every instance:
+        // the closest instance owns the project an event names. A payload
+        // without a location names none, so it is traced only for a session
+        // this project already knows.
+        const forwarded =
+          event.location !== undefined
+            ? ownsEvent(registry, instance, event.location)
+            : session !== undefined && tracer.knows(session);
+        if (!forwarded) continue;
+        // Two instances of one project forward the same event: trace it once.
+        if (!tracer.accept(event)) continue;
         try {
           tracer.handle(event);
         } catch (error) {
           log("warn", `failed to trace ${event.type}: ${String(error)}`);
-        }
-        if (event.type === "session.deleted" && session !== undefined) {
-          releaseSession(registry, session);
         }
       }
     } catch (error) {
@@ -193,17 +260,5 @@ export const setupV2 = async (ctx: PluginContext) => {
   log("info", `tracing initialized → ${endpointLabel(config)} (${ctx.location.directory})`);
   debug(`tracing ready ${key} ${endpointLabel(config)}`);
 
-  return async () => {
-    controller.abort();
-    unregisterInstance(registry, instance);
-    tracer.shutdown();
-    flush();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise((done) => (timer = setTimeout(done, SHUTDOWN_FLUSH_TIMEOUT_MS)));
-    await Promise.race([Promise.allSettled(inFlight), timeout]);
-    clearTimeout(timer);
-    // The pipeline stays registered: this unload may be a config reload in the
-    // same process, and the next setup for this Location reuses it.
-    debug(`cleanup ${key}`);
-  };
+  return stop;
 };
