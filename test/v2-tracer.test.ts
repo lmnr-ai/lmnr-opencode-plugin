@@ -461,6 +461,9 @@ describe("SessionTracer", () => {
     });
     t.handle(ev("session.created", { sessionID: "ses_child", parentID: "ses_parent" }));
     t.handle(ev("session.execution.started", { sessionID: "ses_child" }));
+    // A subagent of the subagent: abandoning the root must reach it too.
+    t.handle(ev("session.created", { sessionID: "ses_grandchild", parentID: "ses_child" }));
+    t.handle(ev("session.execution.started", { sessionID: "ses_grandchild" }));
 
     // A step of the subagent that is still streaming when the handoff happens.
     t.handle(ev("session.step.started", {
@@ -476,6 +479,7 @@ describe("SessionTracer", () => {
     // session nor the subagent it spawned keeps answering for its events.
     assert.equal(t.knows("ses_parent"), false);
     assert.equal(t.knows("ses_child"), false);
+    assert.equal(t.knows("ses_grandchild"), false);
     const turns = byName("opencode turn");
     assert.equal(turns.length, 1);
     assert.equal(turns[0]?.status.message, "session moved to another project");
