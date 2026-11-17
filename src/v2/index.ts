@@ -202,7 +202,12 @@ export const setupV2 = async (ctx: PluginContext) => {
   const instance = registerInstance(registry, ctx.location);
   const controller = new AbortController();
 
+  let stopped = false;
   const stop = async () => {
+    // Cleanup may be called more than once; the project's reference count must
+    // only drop once.
+    if (stopped) return;
+    stopped = true;
     controller.abort();
     unregisterInstance(registry, instance);
     // Turn-end flushes run in the background, but short-lived runs such as
