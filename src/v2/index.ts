@@ -5,7 +5,7 @@ import { debug } from "../debug";
 import { endpointLabel, resolveLaminarConfig } from "./config";
 import { locationKey } from "./location";
 import {
-  ownsEvent,
+  ownerKey,
   type PipelineEntry,
   registerInstance,
   type TracingRegistry,
@@ -131,12 +131,28 @@ const releasePipeline = (
   );
 };
 
+/** Flush and close an exporter that a new configuration replaced. */
+const retireProcessor = (processor: SpanProcessor, key: string): void => {
+  later(async () => {
+    try {
+      await processor.forceFlush?.();
+      await processor.shutdown();
+    } catch (error) {
+      log("warn", `retired exporter shutdown failed: ${String(error)}`);
+    }
+    debug(`exporter retired ${key}`);
+  });
+};
+
 /**
  * One pipeline per project, reused across plugin reloads.
  *
  * Reloading the plugin must not create a new exporter or a new tracer: the ones
  * in flight still hold the open spans and the session state of the current turn.
- * They are replaced only when the resolved configuration actually changes.
+ * A configuration change swaps the exporter inside the same entry, so every
+ * instance of the project keeps forwarding into the tracer it already has; the
+ * router keeps the spans that started under the old exporter on it, so they are
+ * exported where they belong.
  */
 const acquirePipeline = (
   registry: TracingRegistry,
@@ -145,7 +161,16 @@ const acquirePipeline = (
   createProcessor: () => SpanProcessor,
 ): PipelineEntry => {
   const existing = registry.entries.get(key);
-  if (existing && existing.signature === signature) {
+  if (existing) {
+    if (existing.signature !== signature) {
+      const previous = existing.processor;
+      existing.processor = createProcessor();
+      existing.signature = signature;
+      existing.detach();
+      existing.detach = registry.router.register(key, existing.processor);
+      debug(`exporter replaced ${key}`);
+      retireProcessor(previous, key);
+    }
     existing.instances += 1;
     debug(`pipeline reused ${key}`);
     return existing;
@@ -164,7 +189,6 @@ const acquirePipeline = (
   registry.entries.set(key, entry);
   // The signature contains the project API key: never put it in a log.
   debug(`pipeline created ${key}`);
-  if (existing) retirePipeline(registry, key, existing, "configuration changed");
   return entry;
 };
 
@@ -199,7 +223,7 @@ export const setupV2 = async (ctx: PluginContext) => {
   // plugin per location, and locations nest. They share the pipeline and the
   // tracer, so forwarding the same event twice is harmless; the closest
   // instance is the one that owns the project a payload names.
-  const instance = registerInstance(registry, ctx.location);
+  const instance = registerInstance(registry, key, ctx.location);
   const controller = new AbortController();
 
   let stopped = false;
@@ -240,15 +264,24 @@ export const setupV2 = async (ctx: PluginContext) => {
     try {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         const session = eventSession(event);
-        // The shared server delivers every project's events to every instance:
-        // the closest instance owns the project an event names. A payload
-        // without a location names none, so it is traced only for a session
-        // this project already knows.
+        // The shared server delivers every project's events to every instance.
+        // The pipeline of the closest instance owns the project an event names;
+        // every instance of that pipeline forwards it, which is harmless
+        // because they share a tracer. A payload without a location uses the
+        // location its session was last seen at, or is traced only when this
+        // project already holds the session.
+        const location =
+          event.location ?? (session !== undefined ? tracer.locationOf(session) : undefined);
         const forwarded =
-          event.location !== undefined
-            ? ownsEvent(registry, instance, event.location)
+          location !== undefined
+            ? ownerKey(registry, location) === key
             : session !== undefined && tracer.knows(session);
-        if (!forwarded) continue;
+        if (!forwarded) {
+          // Another project owns the session now: close what was opened here,
+          // or those spans would never see their end events.
+          if (session !== undefined && location !== undefined) tracer.abandon(session);
+          continue;
+        }
         // Two instances of one project forward the same event: trace it once.
         if (!tracer.accept(event)) continue;
         try {

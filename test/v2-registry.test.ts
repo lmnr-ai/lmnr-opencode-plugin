@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { LocationInfo } from "../src/v2/location";
+import { locationKey, type LocationInfo } from "../src/v2/location";
 import {
   createRegistry,
-  ownsEvent,
+  ownerKey,
   registerInstance,
   resetRegistry,
   tracingRegistry,
@@ -18,7 +18,7 @@ const info = (directory: string, root = directory, id = "project") =>
   }) as LocationInfo;
 
 const register = (registry: ReturnType<typeof createRegistry>, location: LocationInfo) =>
-  registerInstance(registry, location);
+  registerInstance(registry, locationKey(location), location);
 
 describe("tracing registry", () => {
   it("is shared by every copy of the plugin module", async () => {
@@ -44,85 +44,49 @@ describe("tracing registry", () => {
   });
 });
 
-describe("ownsEvent", () => {
-  it("lets the instance whose location is exactly the event's trace it", () => {
+describe("ownerKey", () => {
+  it("names the pipeline of the project an event belongs to", () => {
     const registry = createRegistry();
-    const root = register(registry, info("/repo"));
-    const sub = register(registry, info("/repo/src", "/repo"));
+    const root = info("/repo");
+    registerInstance(registry, locationKey(root), root);
+    // Another project, nested inside the first one's directory.
+    const inner = info("/repo/vendor/lib", "/repo/vendor/lib", "inner");
+    registerInstance(registry, locationKey(inner), inner);
 
-    assert.equal(ownsEvent(registry, root, { directory: "/repo" }), true);
-    assert.equal(ownsEvent(registry, sub, { directory: "/repo" }), false);
-    assert.equal(ownsEvent(registry, sub, { directory: "/repo/src" }), true);
-    assert.equal(ownsEvent(registry, root, { directory: "/repo/src" }), false);
+    assert.equal(ownerKey(registry, { directory: "/repo" }), locationKey(root));
+    assert.equal(ownerKey(registry, { directory: "/repo/src" }), locationKey(root));
+    assert.equal(ownerKey(registry, { directory: "/repo/vendor/lib/src" }), locationKey(inner));
   });
 
-  it("lets the deepest enclosing instance win, whatever the load order", () => {
+  it("gives every location of one project the same pipeline", () => {
     const registry = createRegistry();
-    register(registry, info("/repo/src", "/repo"));
-    // The parent loads last, so a tie on coverage would hand it the events.
-    const root = register(registry, info("/repo"));
-    const sub = register(registry, info("/repo/src", "/repo"));
-    const deep = { directory: "/repo/src/packages/app" };
+    const root = info("/repo");
+    const sub = info("/repo/src", "/repo");
+    registerInstance(registry, locationKey(root), root);
+    registerInstance(registry, locationKey(sub), sub);
 
-    assert.ok(sub > root);
-    assert.equal(ownsEvent(registry, sub, deep), true);
-    assert.equal(ownsEvent(registry, root, deep), false);
+    assert.equal(locationKey(root), locationKey(sub));
+    assert.equal(ownerKey(registry, { directory: "/repo/src" }), locationKey(sub));
   });
 
-  it("keeps the enclosing instance for directories no instance was loaded for", () => {
+  it("hands a nested project's events back when its instance unloads", () => {
     const registry = createRegistry();
-    const root = register(registry, info("/repo"));
-    const sub = register(registry, info("/repo/src", "/repo"));
+    const root = info("/repo");
+    registerInstance(registry, locationKey(root), root);
+    const inner = info("/repo/vendor/lib", "/repo/vendor/lib", "inner");
+    const innerID = registerInstance(registry, locationKey(inner), inner);
 
-    assert.equal(ownsEvent(registry, root, { directory: "/repo/docs" }), true);
-    assert.equal(ownsEvent(registry, sub, { directory: "/repo/docs" }), false);
+    assert.equal(ownerKey(registry, { directory: "/repo/vendor/lib" }), locationKey(inner));
+
+    unregisterInstance(registry, innerID);
+
+    assert.equal(ownerKey(registry, { directory: "/repo/vendor/lib" }), locationKey(root));
   });
 
-  it("hands the events back when the nested instance unloads", () => {
+  it("has no pipeline for a location no live instance covers", () => {
     const registry = createRegistry();
-    const root = register(registry, info("/repo"));
-    const sub = register(registry, info("/repo/src", "/repo"));
+    registerInstance(registry, locationKey(info("/repo")), info("/repo"));
 
-    unregisterInstance(registry, sub);
-
-    assert.equal(ownsEvent(registry, root, { directory: "/repo/src" }), true);
-  });
-
-  it("hands a reloaded instance the events of the one it replaces", () => {
-    const registry = createRegistry();
-    const before = register(registry, info("/repo"));
-    const after = register(registry, info("/repo"));
-
-    assert.equal(ownsEvent(registry, after, { directory: "/repo" }), true);
-    assert.equal(ownsEvent(registry, before, { directory: "/repo" }), false);
-  });
-
-  it("lets a project nested in another one trace its own sessions", () => {
-    const registry = createRegistry();
-    const outer = register(registry, info("/repo"));
-    const inner = register(registry, info("/repo/vendor/lib", "/repo/vendor/lib", "inner"));
-
-    assert.equal(ownsEvent(registry, inner, { directory: "/repo/vendor/lib" }), true);
-    assert.equal(ownsEvent(registry, outer, { directory: "/repo/vendor/lib" }), false);
-    // A subdirectory of the nested project is closer to it than to the root.
-    assert.equal(ownsEvent(registry, inner, { directory: "/repo/vendor/lib/src" }), true);
-    assert.equal(ownsEvent(registry, outer, { directory: "/repo/vendor/lib/src" }), false);
-    assert.equal(ownsEvent(registry, outer, { directory: "/repo" }), true);
-  });
-
-  it("ignores events of a project it does not belong to", () => {
-    const registry = createRegistry();
-    const self = register(registry, info("/repo"));
-
-    assert.equal(ownsEvent(registry, self, { directory: "/other" }), false);
-  });
-
-  it("does not let an unregistered instance trace anything", () => {
-    const registry = createRegistry();
-    const self = register(registry, info("/repo"));
-
-    unregisterInstance(registry, self);
-
-    assert.equal(ownsEvent(registry, self, { directory: "/repo" }), false);
+    assert.equal(ownerKey(registry, { directory: "/other" }), undefined);
   });
 });

@@ -60,19 +60,22 @@ describe("setupV2 reloads", () => {
     assert.ok(tracingRegistry().entries.has(key));
   });
 
-  it("replaces the pipeline when the configuration changes", async () => {
+  it("swaps the exporter in place when the configuration changes", async () => {
     const dir = "/tmp/lmnr-setup-replace";
     const key = keyOf(dir);
 
     await (await setupV2(ctxFor(dir, base)))?.();
-    const first = tracingRegistry().entries.get(key)?.processor;
+    const pipeline = tracingRegistry().entries.get(key);
+    const firstExporter = pipeline?.processor;
 
     await (await setupV2(ctxFor(dir, { ...base, baseUrl: "http://127.0.0.1:2" })))?.();
-    const second = tracingRegistry().entries.get(key)?.processor;
 
-    assert.ok(first);
-    assert.ok(second);
-    assert.notEqual(second, first);
+    assert.ok(pipeline);
+    assert.ok(firstExporter);
+    // The exporter follows the configuration, the pipeline and its tracer stay:
+    // a sibling instance keeps forwarding into the same state.
+    assert.equal(tracingRegistry().entries.get(key), pipeline);
+    assert.notEqual(tracingRegistry().entries.get(key)?.processor, firstExporter);
   });
 });
 
