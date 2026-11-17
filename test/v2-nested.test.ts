@@ -18,12 +18,12 @@ const emit = (event: OpenCodeEvent) => {
 
 type Hook = (payload: any) => void | Promise<void>;
 
-const ctxFor = (directory: string, root: string) => {
+const ctxFor = (directory: string, root: string, baseUrl = "http://127.0.0.1:1") => {
   // The host delivers a session's hooks to the Location that owns it.
   const hooks = new Map<string, Hook>();
   const ctx = {
     location: { directory, project: { id: root, directory: root, canonical: root } },
-    options: { projectApiKey: "test", baseUrl: "http://127.0.0.1:1" },
+    options: { projectApiKey: "test", baseUrl },
     session: {
       hook: async (name: string, handler: Hook) => {
         hooks.set(name, handler);
@@ -87,8 +87,8 @@ after(async () => {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
-const start = async (directory: string, root: string) => {
-  const target = ctxFor(directory, root);
+const start = async (directory: string, root: string, baseUrl?: string) => {
+  const target = ctxFor(directory, root, baseUrl);
   const cleanup = await setupV2(target.ctx);
   if (cleanup) cleanups.push(cleanup);
   return target;
@@ -211,6 +211,37 @@ describe("nested locations", () => {
     assert.equal(turns(exporter).length, 1);
     assert.equal(turns(exporter)[0]?.status.message, "session moved to another project");
     assert.equal(turns(inner).length, 1);
+  });
+
+  it("keeps a turn whole through a reload that changes the configuration", async () => {
+    exporter.reset();
+    const base = "/tmp/lmnr-nested-config";
+    const root = await start(base, base);
+    const nested = await start(`${base}/app`, base);
+    capture(exporter, root.ctx.location);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const sessionID = "ses_config";
+    emit(ev("session.execution.started", { sessionID }, nested.ctx.location.directory));
+    await settle();
+    assert.equal(turns(exporter).length, 0);
+
+    // A reload turns up with another endpoint: the exporter is replaced while
+    // the turn is open, the pipeline and its tracer stay, and the span follows
+    // the new exporter to its end.
+    const pipeline = tracingRegistry().entries.get(locationKey(root.ctx.location));
+    const before = pipeline?.processor;
+    const reloaded = await start(`${base}/app`, base, "http://127.0.0.1:2");
+    const after = tracingRegistry().entries.get(locationKey(reloaded.ctx.location));
+    assert.equal(after, pipeline);
+    assert.notEqual(after?.processor, before);
+    capture(exporter, root.ctx.location);
+    emit(ev("session.execution.succeeded", { sessionID }, nested.ctx.location.directory));
+    await settle();
+
+    const traced = turns(exporter);
+    assert.equal(traced.length, 1);
+    assert.equal(traced[0]?.status.message, undefined);
   });
 
   it("leaves a nested project's sessions to the nested project", async () => {
