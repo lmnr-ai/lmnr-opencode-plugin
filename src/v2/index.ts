@@ -69,9 +69,9 @@ const installRouter = (
   return registry.router;
 };
 
-/** Flush the project's exporter, keeping the promise for the next cleanup. */
-const flush = (entry: PipelineEntry): void => {
-  const pending: Promise<void> = entry.processor
+/** Flush a pipeline's exporter, keeping the promise for the next cleanup. */
+const flush = (entry: PipelineEntry, processor: SpanProcessor = entry.processor): void => {
+  const pending: Promise<void> = processor
     .forceFlush()
     .catch((error: unknown) => log("warn", `flush failed: ${String(error)}`))
     .finally(() => entry.inFlight.delete(pending));
@@ -168,6 +168,9 @@ const acquirePipeline = (
       existing.signature = signature;
       existing.detach();
       existing.detach = registry.router.register(key, existing.processor);
+      // Spans already buffered by the old exporter are exported now: from the
+      // swap on, every span in flight ends on the new one.
+      flush(existing, previous);
       debug(`exporter replaced ${key}`);
       retireProcessor(previous, key);
     }

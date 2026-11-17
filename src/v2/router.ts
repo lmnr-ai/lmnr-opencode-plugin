@@ -23,7 +23,8 @@ export const LOCATION_ATTRIBUTE =
  */
 export class LocationSpanRouter implements SpanProcessor {
   private readonly processors = new Map<string, SpanProcessor>();
-  private readonly spanProcessors = new Map<string, SpanProcessor>();
+  /** The pipeline each span started under, so a replacement still ends it. */
+  private readonly spanKeys = new Map<string, string>();
 
   /**
    * Route the spans tagged with `key` to `processor`.
@@ -49,18 +50,21 @@ export class LocationSpanRouter implements SpanProcessor {
       debug(`span dropped: no pipeline for ${key}`);
       return;
     }
-    this.spanProcessors.set(span.spanContext().spanId, processor);
+    // The key, not the processor: a configuration change replaces the exporter
+    // while the span is in flight, and the span must be exported by whatever
+    // the key points at when it ends.
+    this.spanKeys.set(span.spanContext().spanId, key);
     processor.onStart(span, parentContext);
   }
 
   onEnd(span: ReadableSpan): void {
     const spanId = span.spanContext().spanId;
-    const processor = this.spanProcessors.get(spanId);
-    if (!processor) return;
+    const key = this.spanKeys.get(spanId);
+    if (key === undefined) return;
     try {
-      processor.onEnd(span);
+      this.processors.get(key)?.onEnd(span);
     } finally {
-      this.spanProcessors.delete(spanId);
+      this.spanKeys.delete(spanId);
     }
   }
 
@@ -71,7 +75,7 @@ export class LocationSpanRouter implements SpanProcessor {
   async shutdown(): Promise<void> {
     const processors = [...new Set(this.processors.values())];
     this.processors.clear();
-    this.spanProcessors.clear();
+    this.spanKeys.clear();
     await Promise.all(processors.map((p) => p.shutdown()));
   }
 }

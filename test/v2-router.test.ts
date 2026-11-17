@@ -70,6 +70,25 @@ describe("LocationSpanRouter", () => {
     assert.deepEqual(second.exporter.getFinishedSpans().map((s) => s.name), ["after.reload"]);
   });
 
+  it("ends a span on the pipeline that replaced its own", () => {
+    const router = new LocationSpanRouter();
+    const first = exporterFor();
+    const second = exporterFor();
+    router.register("A", first.processor);
+    const { tracer } = providerFor(router);
+
+    // The span starts under the first exporter and a configuration change
+    // replaces it while the span is still open.
+    const span = tracer.startSpan("in.flight", {
+      attributes: { [LOCATION_ATTRIBUTE]: "A" },
+    });
+    router.register("A", second.processor);
+    span.end();
+
+    assert.deepEqual(second.exporter.getFinishedSpans().map((s) => s.name), ["in.flight"]);
+    assert.equal(first.exporter.getFinishedSpans().length, 0);
+  });
+
   it("unregisters only the current pipeline", () => {
     const router = new LocationSpanRouter();
     const processor = exporterFor().processor;

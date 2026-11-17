@@ -151,10 +151,13 @@ export class SessionTracer {
    * subagents it spawned.
    */
   abandon(sessionID: string, reason = "session moved to another project") {
-    const state = this.sessions.get(sessionID);
-    if (!state) return;
-    for (const [id, candidate] of [...this.sessions]) {
-      if (id !== sessionID && this.rootSessionId(candidate) !== sessionID) continue;
+    if (!this.sessions.has(sessionID)) return;
+    // Collect first: deleting the child would cut the grandchild's lineage
+    // before it is reached.
+    const doomed = [...this.sessions].filter(
+      ([id, candidate]) => id === sessionID || this.rootSessionId(candidate) === sessionID,
+    );
+    for (const [id, candidate] of doomed) {
       this.endTurn(candidate, Date.now(), reason);
       this.sessions.delete(id);
     }
