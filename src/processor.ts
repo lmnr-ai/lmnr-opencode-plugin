@@ -3,7 +3,11 @@ import { Context, type Span, trace } from "@opentelemetry/api";
 import { type ReadableSpan } from "@opentelemetry/sdk-trace-base";
 
 import { sessionCurrentTurnSpan } from "./state";
-import { getParentSpanId, otelSpanIdToUUID } from "./utils";
+import {
+  dropAiSdkWrapperContent,
+  getParentSpanId,
+  otelSpanIdToUUID,
+} from "./utils";
 
 const SPAWNING_TOOL_NAMES = ["task"];
 
@@ -118,6 +122,9 @@ export class OpenCodeLaminarSpanProcessor extends LaminarSpanProcessor {
   override onEnd(span: ReadableSpan) {
     const spanId = span.spanContext().spanId;
     delete this.spawningSpanIdtoToolUseId[spanId];
+    // The span has ended, so setAttribute is a no-op; edit the attributes in
+    // place before the batch exporter reads them.
+    dropAiSdkWrapperContent(span.attributes);
     super.onEnd(span);
   }
 }
