@@ -1,3 +1,4 @@
+import { type Attributes } from "@opentelemetry/api";
 import { config } from "dotenv";
 import * as path from "path";
 
@@ -17,6 +18,30 @@ export const otelSpanIdToUUID = (spanId: string): string => {
       /^([0-9a-f]{8})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{12})$/,
       "$1-$2-$3-$4-$5",
     );
+};
+
+// AI SDK wrapper spans (`session.llm` in OpenCode) repeat the full prompt and
+// response of their `doStream`/`doGenerate` child spans.
+const AI_SDK_WRAPPER_OPERATIONS = [
+  "ai.streamText",
+  "ai.generateText",
+  "ai.streamObject",
+  "ai.generateObject",
+];
+
+export const dropAiSdkWrapperContent = (attributes: Attributes): void => {
+  const operationId = attributes["ai.operationId"];
+  if (
+    typeof operationId !== "string" ||
+    !AI_SDK_WRAPPER_OPERATIONS.includes(operationId)
+  ) {
+    return;
+  }
+  for (const key of Object.keys(attributes)) {
+    if (key.startsWith("ai.prompt") || key.startsWith("ai.response.")) {
+      delete attributes[key];
+    }
+  }
 };
 
 export const loadEnv = (options?: {
