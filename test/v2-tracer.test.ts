@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { afterEach, before, describe, it } from "node:test";
 
 import plugin from "../src/index";
+import { locationRouter } from "../src/v2/router";
 import { SessionTracer } from "../src/v2/tracer";
 import type { OpenCodeEvent } from "../src/v2/types";
 
@@ -16,19 +17,31 @@ const exporter = new InMemorySpanExporter();
 before(() => {
   Laminar.initialize({
     projectApiKey: "test",
-    // The real Laminar processor (it adds span paths), exporting to memory.
-    spanProcessor: new LaminarSpanProcessor({
-      spanProcessor: new SimpleSpanProcessor(exporter),
-    }),
+    // The router sees the same Laminar processor the server installs; below it,
+    // each Location owns its exporter. Here the default key exports to memory.
+    spanProcessor: locationRouter,
     instrumentModules: {},
   });
+  locationRouter.register(
+    "default",
+    // The real Laminar processor (it adds span paths), exporting to memory.
+    new LaminarSpanProcessor({
+      spanProcessor: new SimpleSpanProcessor(exporter),
+    }),
+  );
 });
 
 afterEach(() => exporter.reset());
 
 let clock = 1_700_000_000_000;
-const ev = (type: string, data: Record<string, unknown>) =>
-  ({ id: `evt_${clock}`, type, created: (clock += 10), data }) as unknown as OpenCodeEvent;
+const ev = (type: string, data: Record<string, unknown>, directory?: string) =>
+  ({
+    id: `evt_${clock}`,
+    type,
+    created: (clock += 10),
+    data,
+    ...(directory !== undefined ? { location: { directory } } : {}),
+  }) as unknown as OpenCodeEvent;
 
 const model = { providerID: "anthropic", id: "claude-sonnet-4-5" };
 const tokens = { input: 100, output: 20, reasoning: 5, cache: { read: 50, write: 10 } };
@@ -397,5 +410,80 @@ describe("SessionTracer", () => {
     step(t, "ses_loop", "msg_l2", { text: "still tracing" });
     t.handle(ev("session.execution.succeeded", { sessionID: "ses_loop" }));
     assert.equal(byName("opencode turn").length, 1);
+  });
+  it("knows a session only once a hook or an event named it", () => {
+    const t = new SessionTracer();
+
+    assert.equal(t.knows("ses_known"), false);
+
+    // A hook alone is enough: it is how a nested instance learns a session
+    // whose events arrive without a location.
+    t.onPrompt(prompt("ses_known", "hello"));
+    assert.equal(t.knows("ses_known"), true);
+
+    // Sessions the tracer never saw stay unknown, so they are not mistaken for
+    // one of its own.
+    assert.equal(t.knows("ses_other"), false);
+
+    t.handle(ev("session.deleted", { sessionID: "ses_known" }));
+    assert.equal(t.knows("ses_known"), false);
+  });
+
+  it("traces each event once, though every instance forwards it", () => {
+    const t = new SessionTracer();
+    const started = ev("session.execution.started", { sessionID: "ses_twice" });
+
+    assert.equal(t.accept(started), true);
+    assert.equal(t.accept(started), false);
+    t.handle(started);
+
+    const ended = ev("session.execution.succeeded", { sessionID: "ses_twice" });
+    assert.equal(t.accept(ended), true);
+    t.handle(ended);
+
+    assert.equal(byName("opencode turn").length, 1);
+  });
+
+  it("remembers the location a session was seen at", () => {
+    const t = new SessionTracer();
+
+    assert.equal(t.locationOf("ses_located"), undefined);
+
+    t.handle(ev("session.created", { sessionID: "ses_located" }, "/repo/app"));
+    assert.deepEqual(t.locationOf("ses_located"), { directory: "/repo/app" });
+  });
+
+  it("forgets a session another project owns, subagents included", () => {
+    const t = new SessionTracer();
+    t.handle(ev("session.execution.started", { sessionID: "ses_parent" }, "/repo/app"));
+    step(t, "ses_parent", "msg_p", {
+      tool: { id: "call_spawn", name: "subagent", input: {} },
+    });
+    t.handle(ev("session.created", { sessionID: "ses_child", parentID: "ses_parent" }));
+    t.handle(ev("session.execution.started", { sessionID: "ses_child" }));
+    // A subagent of the subagent: abandoning the root must reach it too.
+    t.handle(ev("session.created", { sessionID: "ses_grandchild", parentID: "ses_child" }));
+    t.handle(ev("session.execution.started", { sessionID: "ses_grandchild" }));
+
+    // A step of the subagent that is still streaming when the handoff happens.
+    t.handle(ev("session.step.started", {
+      sessionID: "ses_child",
+      assistantMessageID: "msg_c",
+      agent: "build",
+      model,
+      started: clock,
+    }));
+    t.abandon("ses_parent");
+
+    // The spans the other project will never end are closed, and neither the
+    // session nor the subagent it spawned keeps answering for its events.
+    assert.equal(t.knows("ses_parent"), false);
+    assert.equal(t.knows("ses_child"), false);
+    assert.equal(t.knows("ses_grandchild"), false);
+    const turns = byName("opencode turn");
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0]?.status.message, "session moved to another project");
+    const childLLM = byName("ai.llm anthropic:claude-sonnet-4-5").at(-1);
+    assert.equal(childLLM?.status.message, "session moved to another project");
   });
 });

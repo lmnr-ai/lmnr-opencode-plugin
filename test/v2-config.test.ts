@@ -1,0 +1,197 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { after, describe, it } from "node:test";
+
+import { endpointLabel, readProjectEnv, resolveLaminarConfig, sameLaminarConfig } from "../src/v2/config";
+import type { PluginContext } from "../src/v2/types";
+
+const roots: string[] = [];
+
+const project = (files: Record<string, string>): string => {
+  const root = mkdtempSync(path.join(tmpdir(), "lmnr-config-"));
+  roots.push(root);
+  for (const [name, content] of Object.entries(files)) {
+    writeFileSync(path.join(root, name), content);
+  }
+  return root;
+};
+
+const context = (
+  root: string,
+  options: Record<string, unknown> = {},
+  directory = root,
+) =>
+  ({
+    location: {
+      directory,
+      project: { id: "project", directory: root, canonical: root },
+    },
+    options,
+  }) as unknown as Pick<PluginContext, "location" | "options">;
+
+after(() => {
+  for (const root of roots) rmSync(root, { recursive: true, force: true });
+});
+
+describe("readProjectEnv", () => {
+  it("merges env files in override order", () => {
+    const root = project({
+      ".env": "LMNR_PROJECT_API_KEY=base\nLMNR_BASE_URL=http://base\n",
+      ".env.local": "LMNR_BASE_URL=http://local\n",
+      ".env.production": "LMNR_GRPC_PORT=9999\n",
+      ".env.production.local": "LMNR_BASE_URL=http://production\n",
+    });
+
+    const env = readProjectEnv(root, "production");
+
+    assert.equal(env.LMNR_PROJECT_API_KEY, "base");
+    assert.equal(env.LMNR_BASE_URL, "http://production");
+    assert.equal(env.LMNR_GRPC_PORT, "9999");
+  });
+
+  it("does not write to process.env", () => {
+    const root = project({ ".env": "LMNR_LOCAL_ONLY_TEST=1\n" });
+
+    readProjectEnv(root, "production");
+    resolveLaminarConfig(context(root), {});
+
+    assert.equal(process.env.LMNR_LOCAL_ONLY_TEST, undefined);
+  });
+});
+
+describe("resolveLaminarConfig", () => {
+  it("prefers options, then the project env, then the service env", () => {
+    const root = project({
+      ".env": "LMNR_PROJECT_API_KEY=project-key\nLMNR_BASE_URL=http://project\n",
+    });
+    const service = { LMNR_PROJECT_API_KEY: "service-key", LMNR_BASE_URL: "http://service" };
+
+    const resolved = resolveLaminarConfig(context(root), service);
+
+    assert.equal(resolved.projectApiKey, "project-key");
+    assert.equal(resolved.baseUrl, "http://project");
+    assert.equal(resolved.port, undefined);
+
+    const withOptions = resolveLaminarConfig(
+      context(root, { projectApiKey: "option-key", baseUrl: "http://option" }),
+      service,
+    );
+    assert.equal(withOptions.projectApiKey, "option-key");
+    assert.equal(withOptions.baseUrl, "http://option");
+  });
+
+  it("reads the project env from the project root, not the session directory", () => {
+    const root = project({ ".env": "LMNR_PROJECT_API_KEY=root-key\n" });
+    mkdirSync(path.join(root, "packages", "app"), { recursive: true });
+
+    const resolved = resolveLaminarConfig(
+      context(root, {}, path.join(root, "packages", "app")),
+      {},
+    );
+
+    assert.equal(resolved.projectApiKey, "root-key");
+  });
+
+  it("falls back to Laminar Cloud with its gRPC port", () => {
+    const root = project({});
+
+    const resolved = resolveLaminarConfig(context(root), { LMNR_PROJECT_API_KEY: "key" });
+
+    assert.equal(resolved.baseUrl, "https://api.lmnr.ai");
+    assert.equal(resolved.port, 8443);
+  });
+
+  it("takes the gRPC port from the base URL", () => {
+    const root = project({});
+
+    const resolved = resolveLaminarConfig(context(root), {
+      LMNR_PROJECT_API_KEY: "key",
+      LMNR_BASE_URL: "http://192.168.178.204:8001",
+    });
+
+    assert.equal(resolved.port, 8001);
+    assert.equal(endpointLabel(resolved), "http://192.168.178.204:8001");
+  });
+
+  it("reads the gRPC port through a trailing slash or a path", () => {
+    const root = project({});
+
+    for (const baseUrl of [
+      "http://192.168.178.204:8001/",
+      "http://192.168.178.204:8001/laminar",
+      "http://192.168.178.204:8001/laminar/?trace=1",
+    ]) {
+      const resolved = resolveLaminarConfig(context(root), {
+        LMNR_PROJECT_API_KEY: "key",
+        LMNR_BASE_URL: baseUrl,
+      });
+
+      // The exporter appends the port to the base URL itself, so anything after
+      // the authority must be gone by the time it sees it.
+      assert.equal(resolved.baseUrl, "http://192.168.178.204");
+      assert.equal(resolved.port, 8001);
+      assert.equal(endpointLabel(resolved), "http://192.168.178.204:8001");
+    }
+  });
+
+  it("still reaches Laminar Cloud through a trailing slash", () => {
+    const root = project({});
+
+    const resolved = resolveLaminarConfig(context(root), {
+      LMNR_PROJECT_API_KEY: "key",
+      LMNR_BASE_URL: "https://api.lmnr.ai/",
+    });
+
+    assert.equal(resolved.baseUrl, "https://api.lmnr.ai");
+    assert.equal(resolved.port, 8443);
+  });
+
+  it("lets LMNR_GRPC_PORT override the base URL port", () => {
+    const root = project({});
+
+    const resolved = resolveLaminarConfig(context(root), {
+      LMNR_PROJECT_API_KEY: "key",
+      LMNR_BASE_URL: "http://192.168.178.204:8001",
+      LMNR_GRPC_PORT: "9100",
+    });
+
+    assert.equal(resolved.port, 9100);
+    assert.equal(endpointLabel(resolved), "http://192.168.178.204:9100");
+  });
+
+  it("reports a missing project API key", () => {
+    const root = project({});
+
+    assert.equal(resolveLaminarConfig(context(root), {}).projectApiKey, undefined);
+  });
+});
+
+describe("sameLaminarConfig", () => {
+  it("compares the resolved fields, not the object identity", () => {
+    const config = { projectApiKey: "key", baseUrl: "http://host", port: 8001 };
+
+    assert.equal(
+      sameLaminarConfig(config, {
+        port: 8001,
+        baseUrl: "http://host",
+        projectApiKey: "key",
+      }),
+      true,
+    );
+    assert.equal(sameLaminarConfig(config, { ...config, projectApiKey: "other" }), false);
+    assert.equal(sameLaminarConfig(config, { ...config, baseUrl: "http://other" }), false);
+    assert.equal(sameLaminarConfig(config, { ...config, port: 8002 }), false);
+  });
+
+  it("keeps a missing port distinct from an explicit one", () => {
+    assert.equal(
+      sameLaminarConfig(
+        { projectApiKey: "key", baseUrl: "http://host" },
+        { projectApiKey: "key", baseUrl: "http://host", port: 8443 },
+      ),
+      false,
+    );
+  });
+});

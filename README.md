@@ -48,6 +48,8 @@ If `LMNR_PROJECT_API_KEY` is not set, the plugin does nothing.
 
 **OpenCode V2.** The plugin subscribes to OpenCode's event stream and builds the spans itself: one span per model step (with the request messages, the response, token usage and cost) and one per tool call. It reads each step's messages from the `context` session hook and records them in OpenCode's own message format. V2 removed the `experimental.openTelemetry` flag, so the plugin doesn't use it.
 
+Each OpenCode project gets its own exporter. The server keeps one tracer provider for the process, and the plugin routes every span to the pipeline of the project it belongs to, so two projects can report to different Laminar projects or self-hosted instances — and editing a project's options or `.env` takes effect on reload, without restarting OpenCode. Every location of one project shares that pipeline and its tracer: a hook that reaches one instance and an event that reaches another build the same trace, each event is traced once, and a reload keeps the turn in flight instead of starting a second one.
+
 **OpenCode V1.** The plugin turns on OpenCode's experimental OpenTelemetry flag and adds a Laminar span processor. The processor saves each conversation turn as its own trace, groups traces by session ID, and adds the attributes that power Laminar-specific features.
 
 To parent a turn under a span from your own code, pass a serialized Laminar span context as `lmnrSpanContext` in the prompt metadata (V2) or in a synthetic message part (V1).
@@ -59,8 +61,12 @@ To parent a turn under a span from your own code, pass a serialized Laminar span
 | `LMNR_PROJECT_API_KEY` | (required) | Laminar project API key |
 | `LMNR_BASE_URL` | `https://api.lmnr.ai` | Point at a self-hosted Laminar instance |
 | `LMNR_GRPC_PORT` | `8443` for Laminar Cloud, SDK default otherwise | gRPC port for the exporter |
+| `LMNR_PIPELINE_RETIRE_MS` | `60000` | Keep an unloaded project's pipeline alive this long for a reload (service environment) |
+| `LMNR_DEBUG_LOG` | unset | Append plugin diagnostics to this file |
 
-On V2, `projectApiKey` and `baseUrl` plugin options take precedence over the environment:
+A self-hosted instance that serves gRPC on a non-default port needs that port either in `LMNR_GRPC_PORT` or in `LMNR_BASE_URL` (`http://laminar.example.com:8001`); without it the exporter uses `8443` and the spans never arrive. Only the scheme and host of `LMNR_BASE_URL` are used, so a trailing slash or a path is ignored. The OpenCode server discards a plugin's stdout, so `LMNR_DEBUG_LOG` is the way to see the resolved endpoint, pipeline reuse and turn start/end in the background service.
+
+On V2, the configuration is resolved per project. The plugin options take precedence over the project's `.env` files, which take precedence over the environment of the OpenCode service:
 
 ```json
 {
@@ -72,6 +78,8 @@ On V2, `projectApiKey` and `baseUrl` plugin options take precedence over the env
     ]
 }
 ```
+
+Put that `plugins` entry in the project's `opencode.json(c)` (or `.opencode/opencode.json(c)`) to configure only that project, and in the global config to set a default. The same applies to the variables above: a project `.env` overrides the service environment, and two projects in the same OpenCode server can use different keys, endpoints and ports. Values are read at plugin load, so after editing them use `/reload`; restarting the service is not needed. After updating the plugin itself, restart the service once: the previous version may have initialized Laminar in the running process.
 
 ## Learn more
 
