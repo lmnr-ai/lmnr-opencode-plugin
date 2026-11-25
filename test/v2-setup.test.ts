@@ -41,12 +41,12 @@ describe("setupV2 reloads", () => {
     const key = keyOf(dir);
 
     await (await setupV2(ctxFor(dir, base)))?.();
-    const processor = tracingRegistry().entries.get(key)?.processor;
+    const processor = tracingRegistry().pipelines.get(key)?.processor;
     assert.ok(processor);
 
     await (await setupV2(ctxFor(dir, base)))?.();
 
-    assert.equal(tracingRegistry().entries.get(key)?.processor, processor);
+    assert.equal(tracingRegistry().pipelines.get(key)?.processor, processor);
     assert.equal(tracingRegistry().installed, true);
   });
 
@@ -57,7 +57,7 @@ describe("setupV2 reloads", () => {
     const cleanup = await setupV2(ctxFor(dir, base));
     await cleanup?.();
 
-    assert.ok(tracingRegistry().entries.has(key));
+    assert.ok(tracingRegistry().pipelines.has(key));
   });
 
   it("swaps the exporter in place when the configuration changes", async () => {
@@ -65,7 +65,7 @@ describe("setupV2 reloads", () => {
     const key = keyOf(dir);
 
     await (await setupV2(ctxFor(dir, base)))?.();
-    const pipeline = tracingRegistry().entries.get(key);
+    const pipeline = tracingRegistry().pipelines.get(key);
     const firstExporter = pipeline?.processor;
 
     await (await setupV2(ctxFor(dir, { ...base, baseUrl: "http://127.0.0.1:2" })))?.();
@@ -74,8 +74,8 @@ describe("setupV2 reloads", () => {
     assert.ok(firstExporter);
     // The exporter follows the configuration, the pipeline and its tracer stay:
     // a sibling instance keeps forwarding into the same state.
-    assert.equal(tracingRegistry().entries.get(key), pipeline);
-    assert.notEqual(tracingRegistry().entries.get(key)?.processor, firstExporter);
+    assert.equal(tracingRegistry().pipelines.get(key), pipeline);
+    assert.notEqual(tracingRegistry().pipelines.get(key)?.processor, firstExporter);
   });
 });
 
@@ -87,17 +87,17 @@ describe("setupV2 nested locations", () => {
     // Both instances stay loaded, as in a server with two nested locations.
     await setupV2(ctxFor(root, base, root));
     const key = locationKey(ctxFor(root, base, root).location);
-    const pipeline = tracingRegistry().entries.get(key);
-    const pipelines = tracingRegistry().entries.size;
+    const pipeline = tracingRegistry().pipelines.get(key);
+    const pipelines = tracingRegistry().pipelines.size;
 
     await setupV2(ctxFor(sub, base, root));
 
     assert.equal(locationKey(ctxFor(sub, base, root).location), key);
     // One exporter and one tracer for the project: hooks and events of its
     // locations meet in the same state.
-    assert.equal(tracingRegistry().entries.get(key)?.processor, pipeline?.processor);
-    assert.equal(tracingRegistry().entries.get(key)?.tracer, pipeline?.tracer);
-    assert.equal(tracingRegistry().entries.get(key)?.instances, 2);
-    assert.equal(tracingRegistry().entries.size, pipelines);
+    assert.equal(tracingRegistry().pipelines.get(key)?.processor, pipeline?.processor);
+    assert.equal(tracingRegistry().pipelines.get(key)?.tracer, pipeline?.tracer);
+    assert.equal(tracingRegistry().pipelines.get(key)?.instanceCount, 2);
+    assert.equal(tracingRegistry().pipelines.size, pipelines);
   });
 });

@@ -229,19 +229,55 @@ describe("nested locations", () => {
     // A reload turns up with another endpoint: the exporter is replaced while
     // the turn is open, the pipeline and its tracer stay, and the span follows
     // the new exporter to its end.
-    const pipeline = tracingRegistry().entries.get(locationKey(root.ctx.location));
+    const pipeline = tracingRegistry().pipelines.get(locationKey(root.ctx.location));
     const before = pipeline?.processor;
     const reloaded = await start(`${base}/app`, base, "http://127.0.0.1:2");
-    const after = tracingRegistry().entries.get(locationKey(reloaded.ctx.location));
+    const after = tracingRegistry().pipelines.get(locationKey(reloaded.ctx.location));
     assert.equal(after, pipeline);
     assert.notEqual(after?.processor, before);
     capture(exporter, root.ctx.location);
+    // A step that starts after the swap must still know its parent path: the
+    // new processor never saw the turn start, so the path travels on the span.
+    const assistantMessageID = "msg_config";
+    emit(
+      ev(
+        "session.step.started",
+        {
+          sessionID,
+          assistantMessageID,
+          agent: "build",
+          model: { providerID: "anthropic", id: "claude-sonnet-4-5" },
+          started: clock,
+        },
+        nested.ctx.location.directory,
+      ),
+    );
+    emit(
+      ev(
+        "session.step.ended",
+        {
+          sessionID,
+          assistantMessageID,
+          finish: "stop",
+          cost: 0.01,
+          tokens: { input: 10, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        nested.ctx.location.directory,
+      ),
+    );
     emit(ev("session.execution.succeeded", { sessionID }, nested.ctx.location.directory));
     await settle();
 
     const traced = turns(exporter);
     assert.equal(traced.length, 1);
     assert.equal(traced[0]?.status.message, undefined);
+    const llm = exporter
+      .getFinishedSpans()
+      .find((span) => span.name === "ai.llm anthropic:claude-sonnet-4-5");
+    assert.deepEqual(llm?.attributes["lmnr.span.path"], [
+      "opencode turn",
+      "ai.llm anthropic:claude-sonnet-4-5",
+    ]);
   });
 
   it("leaves a nested project's sessions to the nested project", async () => {

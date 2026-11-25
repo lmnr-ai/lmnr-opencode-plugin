@@ -1,5 +1,5 @@
 import { Laminar, LaminarAttributes } from "@lmnr-ai/lmnr";
-import { type Context, ROOT_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
+import { ROOT_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 
 import { debug } from "../debug";
 import { otelSpanIdToUUID } from "../utils";
@@ -197,12 +197,12 @@ export class SessionTracer {
   }
 
   // Spans attach to the nearest open turn or spawning tool call up the chain.
-  private parentContext(state: SessionState): Context {
+  private parentSpan(state: SessionState): Span | undefined {
     for (const current of this.lineage(state)) {
       const span = current.turn ?? current.spawn?.span;
-      if (span) return trace.setSpan(ROOT_CONTEXT, span);
+      if (span) return span;
     }
-    return ROOT_CONTEXT;
+    return undefined;
   }
 
   // Spans inside a subagent carry the spawning tool call, like the V1 plugin.
@@ -236,13 +236,19 @@ export class SessionTracer {
     if (!this.isChild(state) && !state.turn) {
       this.startTurn(state, options.startTime);
     }
+    const parent = this.parentSpan(state);
+    // The parent path travels on the span itself, so it survives an exporter
+    // swap in the middle of a turn: the new processor never saw the parent.
+    const parentSpanContext = parent ? Laminar.serializeLaminarSpanContext(parent) : null;
     const span = Laminar.startSpan({
       name,
       ...(options.spanType ? { spanType: options.spanType } : {}),
       ...(options.input !== undefined ? { input: options.input } : {}),
       ...(options.startTime !== undefined ? { startTime: options.startTime } : {}),
       sessionId: this.rootSessionId(state),
-      context: this.parentContext(state),
+      ...(parentSpanContext
+        ? { parentSpanContext }
+        : { context: parent ? trace.setSpan(ROOT_CONTEXT, parent) : ROOT_CONTEXT }),
       metadata: { [LOCATION_METADATA_KEY]: this.locationKey },
     });
     span.setAttributes({ ...this.spawnAttributes(state), ...options.attributes });

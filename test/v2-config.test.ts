@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 
-import { endpointLabel, readProjectEnv, resolveLaminarConfig } from "../src/v2/config";
+import { endpointLabel, readProjectEnv, resolveLaminarConfig, sameLaminarConfig } from "../src/v2/config";
 import type { PluginContext } from "../src/v2/types";
 
 const roots: string[] = [];
@@ -165,5 +165,33 @@ describe("resolveLaminarConfig", () => {
     const root = project({});
 
     assert.equal(resolveLaminarConfig(context(root), {}).projectApiKey, undefined);
+  });
+});
+
+describe("sameLaminarConfig", () => {
+  it("compares the resolved fields, not the object identity", () => {
+    const config = { projectApiKey: "key", baseUrl: "http://host", port: 8001 };
+
+    assert.equal(
+      sameLaminarConfig(config, {
+        port: 8001,
+        baseUrl: "http://host",
+        projectApiKey: "key",
+      }),
+      true,
+    );
+    assert.equal(sameLaminarConfig(config, { ...config, projectApiKey: "other" }), false);
+    assert.equal(sameLaminarConfig(config, { ...config, baseUrl: "http://other" }), false);
+    assert.equal(sameLaminarConfig(config, { ...config, port: 8002 }), false);
+  });
+
+  it("keeps a missing port distinct from an explicit one", () => {
+    assert.equal(
+      sameLaminarConfig(
+        { projectApiKey: "key", baseUrl: "http://host" },
+        { projectApiKey: "key", baseUrl: "http://host", port: 8443 },
+      ),
+      false,
+    );
   });
 });

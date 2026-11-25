@@ -109,3 +109,7 @@ export const resolveLaminarConfig = (
 /** The endpoint an exporter actually talks to, port included. */
 export const endpointLabel = ({ baseUrl, port }: LaminarConfig): string =>
   port === undefined ? baseUrl : `${baseUrl}:${port}`;
+
+/** Whether two resolved configurations describe the same exporter. */
+export const sameLaminarConfig = (a: LaminarConfig, b: LaminarConfig): boolean =>
+  a.projectApiKey === b.projectApiKey && a.baseUrl === b.baseUrl && a.port === b.port;

@@ -38,32 +38,21 @@ describe("coverage", () => {
   const rank = (self: LocationInfo, directory: string): number =>
     coverage({ directory }, self) as number;
 
-  it("ranks an exact location above an enclosing one", () => {
+  it("ranks a nested project above the project that encloses it", () => {
+    const outer = nested("/repo", "/repo");
+    const inner = nested("/repo/vendor/lib", "/repo/vendor/lib", "inner");
+    const deep = "/repo/vendor/lib/src";
+
+    assert.ok(rank(inner, deep) > rank(outer, deep));
+  });
+
+  it("covers the project root and its subdirectories from any location of the project", () => {
     const root = nested("/repo", "/repo");
     const sub = nested("/repo/src", "/repo");
 
-    assert.equal(rank(sub, "/repo/src"), 3);
-    assert.equal(rank(root, "/repo/src"), 1.5);
-    assert.ok(rank(sub, "/repo/src") > rank(root, "/repo/src"));
-  });
-
-  it("ranks a nested location above the root that also encloses the session", () => {
-    const root = nested("/repo", "/repo");
-    const sub = nested("/repo/src", "/repo");
-    const deep = "/repo/src/deep/nested";
-
-    assert.ok(rank(sub, deep) > rank(root, deep));
-    assert.ok(rank(root, deep) > 1);
-  });
-
-  it("accepts a directory of the same project, at a lower rank", () => {
-    assert.equal(coverage({ directory: "/repo/docs" }, nested("/repo/src", "/repo")), 1);
-    assert.equal(coverage({ directory: "/repo" }, nested("/repo/src", "/repo")), 1);
-  });
-
-  it("accepts the project directory and its subdirectories", () => {
-    assert.equal(rank(info("/repo"), "/repo"), 3);
-    assert.equal(rank(info("/repo"), "/repo/src"), 1.5);
+    assert.equal(rank(root, "/repo/src"), rank(root, "/repo"));
+    assert.equal(rank(sub, "/repo/src"), rank(root, "/repo/src"));
+    assert.equal(coverage({ directory: "/repo/docs" }, sub), rank(root, "/repo"));
   });
 
   it("rejects another project", () => {
@@ -72,7 +61,13 @@ describe("coverage", () => {
   });
 
   it("compares worktrees by workspace", () => {
-    assert.equal(coverage({ directory: "/worktrees/a", workspaceID: "ws_1" }, info("/repo", "ws_1")), 1);
-    assert.equal(coverage({ directory: "/worktrees/b", workspaceID: "ws_2" }, info("/repo", "ws_1")), undefined);
+    assert.equal(
+      coverage({ directory: "/worktrees/a", workspaceID: "ws_1" }, info("/repo", "ws_1")),
+      0,
+    );
+    assert.equal(
+      coverage({ directory: "/worktrees/b", workspaceID: "ws_2" }, info("/repo", "ws_1")),
+      undefined,
+    );
   });
 });

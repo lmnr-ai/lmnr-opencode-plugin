@@ -40,40 +40,28 @@ const isWithin = (parent: string, child: string): boolean => {
   );
 };
 
-/** How many directories separate `child` from `parent`, or undefined if neither. */
-const depth = (parent: string, child: string): number | undefined => {
-  if (!isWithin(parent, child)) return undefined;
-  const relative = path.relative(parent, child);
-  return relative === "" ? 0 : relative.split(path.sep).length;
-};
-
 /**
  * How closely `self` covers an event's location: `undefined` when the event is
- * not its business, otherwise a larger number the closer the two are.
+ * not its business, otherwise a larger score the more specific the owner.
  *
- * The granularity matters when the plugin is loaded more than once for the same
- * project. An exact location (3) beats one that encloses the event, which beats
- * a sibling directory of the same project or workspace (1). Between enclosing
- * instances the score decreases with their distance: a closed fraction of the
- * segment count, so a location nested in the project always wins the sessions
- * below it over the project root that also contains them.
- *
+ * Instances of one project share a pipeline, so the directory they were loaded
+ * from is irrelevant: only the project boundary decides. A project nested
+ * inside another one has a deeper root and wins the events below it, and a
+ * workspace matches by id because its worktrees are different directories.
  */
 export const coverage = (ref: LocationRef, self: LocationInfo): number | undefined => {
-  const selfDirectory = path.resolve(self.directory);
   // Worktrees are different directories of one workspace: when either side
   // names a workspace, it decides, not the directory.
   const inWorkspace = ref.workspaceID !== undefined || self.workspaceID !== undefined;
   if (inWorkspace && ref.workspaceID !== self.workspaceID) return undefined;
 
+  const root = projectRoot(self);
   const eventDirectory = path.resolve(ref.directory);
-  if (eventDirectory === selfDirectory) return 3;
-  // Sessions opened in a subdirectory of the instance still belong to it, the
-  // closest of its ancestors winning when several of them are loaded.
-  const distance = depth(selfDirectory, eventDirectory);
-  if (distance !== undefined) return 2 - distance / (distance + 1);
-  // Another directory of the same project, or another worktree of the same
-  // workspace: a closer instance may exist, but this one is still a valid owner.
-  if (inWorkspace) return 1;
-  return isWithin(projectRoot(self), eventDirectory) ? 1 : undefined;
+  if (isWithin(root, eventDirectory)) {
+    // A deeper project root is a more specific owner than an enclosing one.
+    return root.split(path.sep).length;
+  }
+  // Another directory of the same workspace: a closer instance may exist, but
+  // this one is still a valid owner.
+  return inWorkspace ? 0 : undefined;
 };
